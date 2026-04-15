@@ -14,4 +14,12 @@ function printAll () {
 }
 printAll()
 
+function findByArtist(artistName) {
+    for (let i = 0; i < library.length; i++) {
+        if (library[i].artist === artistName) {
+        console.log(library[i].title + " by " + library[i].artist);
+        }
+    }
+}
+findByArtist("John Mayer");
 
