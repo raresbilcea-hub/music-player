@@ -48,3 +48,23 @@ function checkDifficulty(song) {
 for (let i = 0; i < library.length; i++) {
     checkDifficulty(library[i]);
 }
+
+let beginnerSongs = library.filter(function(song) {
+    return song.difficulty === "beginner";
+});
+
+console.log("Beginner songs:");
+console.log(beginnerSongs);
+
+let songTitles = library.map(function(song) {
+    return song.title;
+});
+
+console.log("All song titles:");
+console.log(songTitles);
+
+let advancedTitles = library
+.filter(function(song) { return song.difficulty === "advanced"; })
+.map(function(song) { return song.title; });
+
+console.log("Advanced songs:", advancedTitles);
