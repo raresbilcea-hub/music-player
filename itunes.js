@@ -1,7 +1,7 @@
 const https = require('https');
 
-const artist = "Michael Jackson";
-const url = "https://itunes.apple.com/search?term=" + encodeURIComponent(artist) + "&entity=song&limit=13";
+const artist = process.argv[2];
+const url = "https://itunes.apple.com/search?term=" + encodeURIComponent(artist) + "&entity=song&limit=7";
 
 https.get(url, function(response) {
     let data = '';
@@ -15,7 +15,7 @@ https.get(url, function(response) {
         console.log("Songs found:", result.resultCount);
 
         result.results.forEach(function(song) {
-            console.log(song.trackName + " by " + song.artistName);
+            console.log(song.trackName + " by " + song.artistName + " - Album: " + song.collectionName + " Year: " + song.releaseDate.substring(0, 4));
         });
     });
 });
