@@ -1,9 +1,9 @@
 let library = [
-    { title: "My Way", artist: "Frank Sinatra", chords: ["F", "Gm", "Bb", "C", "Am", "Dm"], difficulty: "begginer" },
-    { title: "Music is the answer", artist: "Myself", chords: ["D", "A", "E"], difficulty: "begginerR" },
+    { title: "My Way", artist: "Frank Sinatra", chords: ["F", "Gm", "Bb", "C", "Am", "Dm"], difficulty: "beginner" },
+    { title: "Music is the answer", artist: "Myself", chords: ["D", "A", "E"], difficulty: "beginner" },
     {title: "Belief", artist: "John Mayer", chords: ["Am", "Dm", "G", "Bm"], difficulty: "intermediate" },
     {title: "Lupul", artist: "Rares Bilcea", chords: ["E", "A"], difficulty: "advanced" },
-    {title: "Freedom", artist: "Rares Bilcea", chords: ["POC", "PIC", "BAM"], difficulty: "JustBeFree" },
+    {title: "Freedom", artist: "Rares Bilcea", chords: ["POC", "PIC", "BAM"], difficulty: "advanced" },
 
 ];
 function printAll () {
@@ -33,3 +33,18 @@ function findByDifficulty(difficultyLevel) {
 findByDifficulty("advanced");
 
 
+function checkDifficulty(song) {
+    if (song.difficulty === "beginner") {
+        console.log(song.title + " is easy to play!");
+    } else if (song.difficulty === "intermediate") {
+        console.log(song.title + " needs some practice");
+    } else if (song.difficulty === "advanced") {
+        console.log(song.title + " is challenging");
+    } else {
+        console.log(song.title + " has an unknown difficulty.");
+    }
+}
+
+for (let i = 0; i < library.length; i++) {
+    checkDifficulty(library[i]);
+}
