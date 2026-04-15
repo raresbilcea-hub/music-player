@@ -23,3 +23,13 @@ function findByArtist(artistName) {
 }
 findByArtist("John Mayer");
 
+function findByDifficulty(difficultyLevel) {
+    for (let i = 0; i < library.length; i++) {
+        if (library[i].difficulty === difficultyLevel) {
+            console.log(library[i].title + " by " + library[i].artist);
+        }
+    }
+}
+findByDifficulty("advanced");
+
+
