@@ -180,6 +180,127 @@
       justify-content: space-between;
     }
     .hint { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); letter-spacing: 0.15em; margin-top: 8px; opacity: 0.6; }
+
+    /* DETAIL PANEL */
+    .overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.8);
+      z-index: 2000;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s;
+    }
+    .overlay.open {
+      opacity: 1;
+      pointer-events: all;
+    }
+    .detail-panel {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: var(--surface);
+      border-top: 1px solid var(--gold-dim);
+      z-index: 2001;
+      padding: 40px;
+      transform: translateY(100%);
+      transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+    .detail-panel.open {
+      transform: translateY(0);
+    }
+    .detail-header {
+      display: grid;
+      grid-template-columns: 120px 1fr auto;
+      gap: 24px;
+      align-items: start;
+      margin-bottom: 32px;
+    }
+    .detail-artwork {
+      width: 120px;
+      height: 120px;
+      object-fit: cover;
+      border: 1px solid var(--border);
+    }
+    .detail-title {
+      font-family: 'Playfair Display', serif;
+      font-size: 28px;
+      font-weight: 700;
+      color: var(--cream);
+      line-height: 1.1;
+      margin-bottom: 8px;
+    }
+    .detail-artist {
+      font-size: 16px;
+      color: var(--gold);
+      margin-bottom: 4px;
+    }
+    .detail-album {
+      font-size: 14px;
+      color: var(--muted);
+    }
+    .close-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 8px 16px;
+      font-family: 'DM Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      cursor: crosshair;
+      transition: all 0.2s;
+    }
+    .close-btn:hover {
+      border-color: var(--gold-dim);
+      color: var(--gold);
+      background: transparent;
+    }
+    .detail-divider {
+      height: 1px;
+      background: var(--border);
+      margin: 24px 0;
+    }
+    .detail-meta-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+    }
+    .meta-item {}
+    .meta-label {
+      font-family: 'DM Mono', monospace;
+      font-size: 9px;
+      letter-spacing: 0.3em;
+      color: var(--gold-dim);
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .meta-value {
+      font-size: 16px;
+      color: var(--cream);
+    }
+    .coming-soon {
+      margin-top: 32px;
+      padding: 20px;
+      border: 1px dashed var(--border);
+      text-align: center;
+    }
+    .coming-soon-label {
+      font-family: 'DM Mono', monospace;
+      font-size: 9px;
+      letter-spacing: 0.3em;
+      color: var(--gold-dim);
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .coming-soon-text {
+      font-size: 14px;
+      color: var(--muted);
+      font-style: italic;
+    }
+
     @keyframes fadeDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
     @keyframes fadeUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
   </style>
@@ -209,10 +330,69 @@
     </footer>
   </div>
 
+  <!-- Detail Panel -->
+  <div class="overlay" id="overlay" onclick="closeDetail()"></div>
+  <div class="detail-panel" id="detailPanel">
+    <div class="detail-header">
+      <img class="detail-artwork" id="detailArtwork" src="" onerror="this.style.visibility='hidden'" />
+      <div>
+        <div class="detail-title" id="detailTitle"></div>
+        <div class="detail-artist" id="detailArtist"></div>
+        <div class="detail-album" id="detailAlbum"></div>
+      </div>
+      <button class="close-btn" onclick="closeDetail()">✕ Close</button>
+    </div>
+
+    <div class="detail-divider"></div>
+
+    <div class="detail-meta-grid">
+      <div class="meta-item">
+        <div class="meta-label">Year</div>
+        <div class="meta-value" id="detailYear"></div>
+      </div>
+      <div class="meta-item">
+        <div class="meta-label">Genre</div>
+        <div class="meta-value" id="detailGenre"></div>
+      </div>
+      <div class="meta-item">
+        <div class="meta-label">Duration</div>
+        <div class="meta-value" id="detailDuration"></div>
+      </div>
+    </div>
+
+    <div class="coming-soon">
+      <div class="coming-soon-label">Coming Soon</div>
+      <div class="coming-soon-text">Chord charts & tabs will appear here — beginner, intermediate & advanced</div>
+    </div>
+  </div>
+
   <script>
     document.getElementById('searchInput').addEventListener('keydown', function(e) {
       if (e.key === 'Enter') searchSongs();
     });
+
+    function openDetail(song) {
+      const artwork = song.artworkUrl100 ? song.artworkUrl100.replace('100x100', '400x400') : '';
+      const year = song.releaseDate ? song.releaseDate.substring(0, 4) : '—';
+      const mins = Math.floor(song.trackTimeMillis / 60000);
+      const secs = Math.floor((song.trackTimeMillis % 60000) / 1000).toString().padStart(2, '0');
+
+      document.getElementById('detailArtwork').src = artwork;
+      document.getElementById('detailTitle').textContent = song.trackName;
+      document.getElementById('detailArtist').textContent = song.artistName;
+      document.getElementById('detailAlbum').textContent = song.collectionName || '—';
+      document.getElementById('detailYear').textContent = year;
+      document.getElementById('detailGenre').textContent = song.primaryGenreName || '—';
+      document.getElementById('detailDuration').textContent = mins + ':' + secs;
+
+      document.getElementById('overlay').classList.add('open');
+      document.getElementById('detailPanel').classList.add('open');
+    }
+
+    function closeDetail() {
+      document.getElementById('overlay').classList.remove('open');
+      document.getElementById('detailPanel').classList.remove('open');
+    }
 
     async function searchSongs() {
       const query = document.getElementById('searchInput').value.trim();
@@ -249,6 +429,9 @@
 
           const card = document.createElement('div');
           card.className = 'song-card';
+          card.addEventListener('click', function() {
+            openDetail(song);
+          });
           card.innerHTML = `
             <span class="song-num">${num}</span>
             <img class="song-artwork" src="${artwork}" onerror="this.style.visibility='hidden'" />
