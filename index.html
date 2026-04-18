@@ -15,11 +15,8 @@
       --cream:     #e8dfc8;
       --muted:     #6b6254;
       --border:    #2a2318;
-      --red:       #8b2e2e;
     }
-
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
     body {
       background-color: var(--bg);
       color: var(--cream);
@@ -28,8 +25,6 @@
       cursor: crosshair;
       overflow-x: hidden;
     }
-
-    /* Grain overlay */
     body::before {
       content: '';
       position: fixed;
@@ -39,8 +34,6 @@
       z-index: 1000;
       opacity: 0.4;
     }
-
-    /* Vignette */
     body::after {
       content: '';
       position: fixed;
@@ -49,20 +42,8 @@
       pointer-events: none;
       z-index: 999;
     }
-
-    .wrapper {
-      max-width: 780px;
-      margin: 0 auto;
-      padding: 60px 40px;
-      position: relative;
-    }
-
-    /* Header */
-    header {
-      margin-bottom: 64px;
-      animation: fadeDown 1s ease both;
-    }
-
+    .wrapper { max-width: 780px; margin: 0 auto; padding: 60px 40px; position: relative; }
+    header { margin-bottom: 64px; animation: fadeDown 1s ease both; }
     .label {
       font-family: 'DM Mono', monospace;
       font-size: 10px;
@@ -72,7 +53,6 @@
       text-transform: uppercase;
       margin-bottom: 12px;
     }
-
     h1 {
       font-family: 'Playfair Display', serif;
       font-size: clamp(42px, 7vw, 72px);
@@ -81,12 +61,7 @@
       color: var(--cream);
       letter-spacing: -0.02em;
     }
-
-    h1 em {
-      font-style: italic;
-      color: var(--gold);
-    }
-
+    h1 em { font-style: italic; color: var(--gold); }
     .tagline {
       margin-top: 16px;
       font-size: 15px;
@@ -96,40 +71,22 @@
       border-left: 1px solid var(--gold-dim);
       padding-left: 14px;
     }
-
-    /* Divider */
-    .divider {
-      display: flex;
-      align-items: center;
-      gap: 16px;
-      margin: 32px 0;
-    }
+    .divider { display: flex; align-items: center; gap: 16px; margin: 32px 0; }
     .divider::before, .divider::after {
       content: '';
       flex: 1;
       height: 1px;
       background: linear-gradient(to right, transparent, var(--border), transparent);
     }
-    .divider-symbol {
-      font-family: 'Playfair Display', serif;
-      color: var(--gold-dim);
-      font-size: 18px;
-    }
-
-    /* Search */
+    .divider-symbol { font-family: 'Playfair Display', serif; color: var(--gold-dim); font-size: 18px; }
     .search-wrap {
       display: flex;
-      gap: 0;
       margin-bottom: 48px;
       animation: fadeUp 1s 0.2s ease both;
       border: 1px solid var(--border);
       background: var(--surface);
     }
-
-    .search-wrap:focus-within {
-      border-color: var(--gold-dim);
-    }
-
+    .search-wrap:focus-within { border-color: var(--gold-dim); }
     input[type="text"] {
       flex: 1;
       background: transparent;
@@ -138,16 +95,10 @@
       padding: 16px 20px;
       font-family: 'Cormorant Garamond', serif;
       font-size: 17px;
-      font-weight: 400;
       color: var(--cream);
       letter-spacing: 0.02em;
     }
-
-    input[type="text"]::placeholder {
-      color: var(--muted);
-      font-style: italic;
-    }
-
+    input[type="text"]::placeholder { color: var(--muted); font-style: italic; }
     button {
       background: var(--gold);
       color: var(--bg);
@@ -155,18 +106,12 @@
       padding: 16px 28px;
       font-family: 'DM Mono', monospace;
       font-size: 10px;
-      font-weight: 400;
       letter-spacing: 0.2em;
       text-transform: uppercase;
       cursor: crosshair;
       transition: background 0.2s;
     }
-
-    button:hover {
-      background: var(--cream);
-    }
-
-    /* Status line */
+    button:hover { background: var(--cream); }
     #status {
       font-family: 'DM Mono', monospace;
       font-size: 11px;
@@ -175,36 +120,21 @@
       margin-bottom: 24px;
       min-height: 18px;
     }
-
-    /* Results */
-    #songs {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-
+    #songs { display: flex; flex-direction: column; gap: 2px; }
     .song-card {
       background: var(--surface);
       border: 1px solid var(--border);
-      padding: 20px 24px;
+      padding: 16px 24px;
       display: grid;
-      grid-template-columns: 32px 1fr auto;
+      grid-template-columns: 32px 52px 1fr auto;
       align-items: center;
-      gap: 20px;
+      gap: 16px;
       transition: background 0.2s, border-color 0.2s;
       animation: fadeUp 0.4s ease both;
       cursor: crosshair;
     }
-
-    .song-card:hover {
-      background: var(--surface2);
-      border-color: var(--gold-dim);
-    }
-
-    .song-card:hover .song-num {
-      color: var(--gold);
-    }
-
+    .song-card:hover { background: var(--surface2); border-color: var(--gold-dim); }
+    .song-card:hover .song-num { color: var(--gold); }
     .song-num {
       font-family: 'DM Mono', monospace;
       font-size: 11px;
@@ -212,9 +142,7 @@
       letter-spacing: 0.1em;
       transition: color 0.2s;
     }
-
-    .song-info {}
-
+    .song-artwork { width: 48px; height: 48px; object-fit: cover; border: 1px solid var(--border); }
     .song-title {
       font-family: 'Playfair Display', serif;
       font-size: 18px;
@@ -223,14 +151,7 @@
       line-height: 1.2;
       margin-bottom: 4px;
     }
-
-    .song-meta {
-      font-size: 13px;
-      font-weight: 300;
-      color: var(--muted);
-      letter-spacing: 0.04em;
-    }
-
+    .song-meta { font-size: 13px; font-weight: 300; color: var(--muted); letter-spacing: 0.04em; }
     .song-year {
       font-family: 'DM Mono', monospace;
       font-size: 11px;
@@ -238,15 +159,14 @@
       letter-spacing: 0.1em;
       white-space: nowrap;
     }
-
-    /* Staggered animation */
-    .song-card:nth-child(1) { animation-delay: 0.0s; }
+    .song-card:nth-child(1) { animation-delay: 0.00s; }
     .song-card:nth-child(2) { animation-delay: 0.07s; }
     .song-card:nth-child(3) { animation-delay: 0.14s; }
     .song-card:nth-child(4) { animation-delay: 0.21s; }
     .song-card:nth-child(5) { animation-delay: 0.28s; }
-
-    /* Footer */
+    .song-card:nth-child(6) { animation-delay: 0.35s; }
+    .song-card:nth-child(7) { animation-delay: 0.42s; }
+    .song-card:nth-child(8) { animation-delay: 0.49s; }
     footer {
       margin-top: 80px;
       padding-top: 24px;
@@ -259,26 +179,9 @@
       display: flex;
       justify-content: space-between;
     }
-
-    /* Animations */
-    @keyframes fadeDown {
-      from { opacity: 0; transform: translateY(-20px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-    @keyframes fadeUp {
-      from { opacity: 0; transform: translateY(16px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-
-    /* Enter key hint */
-    .hint {
-      font-family: 'DM Mono', monospace;
-      font-size: 10px;
-      color: var(--muted);
-      letter-spacing: 0.15em;
-      margin-top: 8px;
-      opacity: 0.6;
-    }
+    .hint { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); letter-spacing: 0.15em; margin-top: 8px; opacity: 0.6; }
+    @keyframes fadeDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes fadeUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
   </style>
 </head>
 <body>
@@ -307,7 +210,6 @@
   </div>
 
   <script>
-    // Allow Enter key to search
     document.getElementById('searchInput').addEventListener('keydown', function(e) {
       if (e.key === 'Enter') searchSongs();
     });
@@ -343,10 +245,13 @@
         data.results.forEach(function(song, index) {
           const year = song.releaseDate ? song.releaseDate.substring(0, 4) : '—';
           const num = String(index + 1).padStart(2, '0');
+          const artwork = song.artworkUrl100 || '';
+
           const card = document.createElement('div');
           card.className = 'song-card';
           card.innerHTML = `
             <span class="song-num">${num}</span>
+            <img class="song-artwork" src="${artwork}" onerror="this.style.visibility='hidden'" />
             <div class="song-info">
               <div class="song-title">${song.trackName}</div>
               <div class="song-meta">${song.artistName} &nbsp;·&nbsp; ${song.collectionName || '—'}</div>
