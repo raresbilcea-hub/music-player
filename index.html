@@ -372,7 +372,7 @@
     });
 
     function openDetail(song) {
-      const artwork = song.artworkUrl100 ? song.artworkUrl100.replace('100x100', '400x400') : '';
+        const artwork = song.artworkUrl100 ? song.artworkUrl100.replace('100x100', '600x600') : '';
       const year = song.releaseDate ? song.releaseDate.substring(0, 4) : '—';
       const mins = Math.floor(song.trackTimeMillis / 60000);
       const secs = Math.floor((song.trackTimeMillis % 60000) / 1000).toString().padStart(2, '0');
