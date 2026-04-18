@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Music Player 2.0</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background-color: #1a1a2e;
+      color: white;
+      padding: 20px;
+    }
+    h1 {
+      color: #e94560;
+    }
+    .song-card {
+      background-color: #16213e;
+      padding: 15px;
+      margin: 10px 0;
+      border-radius: 8px;
+    }
+    .song-title {
+      font-size: 18px;
+      font-weight: bold;
+      color: #e94560;
+    }
+    .song-details {
+      color: #a8a8b3;
+      margin-top: 5px;
+    }
+  </style>
+</head>
+<body>
+  <h1>🎵 Music Player 2.0</h1>
+  <div style="margin: 20px 0;">
+  <input 
+    id="searchInput" 
+    type="text" 
+    placeholder="Search for a song..." 
+    style="padding: 10px; width: 300px; border-radius: 5px; border: none; font-size: 16px;"
+  />
+  <button 
+    onclick="searchSongs()" 
+    style="padding: 10px 20px; background-color: #e94560; color: white; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; margin-left: 10px;"
+  >
+    Search
+  </button>
+</div>
+  <div id="songs">
+    <div class="song-card">
+      <div class="song-title">Hotel California</div>
+      <div class="song-details">Eagles — 1976</div>
+    </div>
+    <div class="song-card">
+      <div class="song-title">Bohemian Rhapsody</div>
+      <div class="song-details">Queen — 1975</div>
+    </div>
+    <div class="song-card">
+      <div class="song-title">Stairway to Heaven</div>
+      <div class="song-details">Led Zeppelin — 1971</div>
+    </div>
+  </div>
+  <script>
+async function searchSongs() {
+  const query = document.getElementById('searchInput').value;
+  
+  if (!query) {
+    alert("Please enter a song name!");
+    return;
+  }
+
+  const songsDiv = document.getElementById('songs');
+  songsDiv.innerHTML = "<p>Searching...</p>";
+
+  const url = "https://itunes.apple.com/search?term=" + 
+    encodeURIComponent(query) + "&entity=song&limit=5&callback=?";
+
+  const response = await fetch("https://itunes.apple.com/search?term=" + 
+    encodeURIComponent(query) + "&entity=song&limit=5");
+  const data = await response.json();
+
+  songsDiv.innerHTML = "";
+
+  data.results.forEach(function(song) {
+    songsDiv.innerHTML += `
+      <div class="song-card">
+        <div class="song-title">${song.trackName}</div>
+        <div class="song-details">${song.artistName} — ${song.releaseDate ? song.releaseDate.substring(0, 4) : "Unknown"}</div>
+      </div>
+    `;
+  });
+}
+</script>
+</body>
+</html>
