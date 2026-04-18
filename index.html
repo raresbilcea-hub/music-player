@@ -1,94 +1,365 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Music Player 2.0</title>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=Cormorant+Garamond:wght@300;400;500&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet">
   <style>
+    :root {
+      --bg:        #0e0c09;
+      --surface:   #16130e;
+      --surface2:  #1e1a13;
+      --gold:      #c9a84c;
+      --gold-dim:  #8a6f32;
+      --cream:     #e8dfc8;
+      --muted:     #6b6254;
+      --border:    #2a2318;
+      --red:       #8b2e2e;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
-      font-family: Arial, sans-serif;
-      background-color: #1a1a2e;
-      color: white;
-      padding: 20px;
+      background-color: var(--bg);
+      color: var(--cream);
+      font-family: 'Cormorant Garamond', serif;
+      min-height: 100vh;
+      cursor: crosshair;
+      overflow-x: hidden;
     }
+
+    /* Grain overlay */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      z-index: 1000;
+      opacity: 0.4;
+    }
+
+    /* Vignette */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.7) 100%);
+      pointer-events: none;
+      z-index: 999;
+    }
+
+    .wrapper {
+      max-width: 780px;
+      margin: 0 auto;
+      padding: 60px 40px;
+      position: relative;
+    }
+
+    /* Header */
+    header {
+      margin-bottom: 64px;
+      animation: fadeDown 1s ease both;
+    }
+
+    .label {
+      font-family: 'DM Mono', monospace;
+      font-size: 10px;
+      font-weight: 300;
+      letter-spacing: 0.3em;
+      color: var(--gold-dim);
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+
     h1 {
-      color: #e94560;
+      font-family: 'Playfair Display', serif;
+      font-size: clamp(42px, 7vw, 72px);
+      font-weight: 700;
+      line-height: 0.95;
+      color: var(--cream);
+      letter-spacing: -0.02em;
     }
-    .song-card {
-      background-color: #16213e;
-      padding: 15px;
-      margin: 10px 0;
-      border-radius: 8px;
+
+    h1 em {
+      font-style: italic;
+      color: var(--gold);
     }
-    .song-title {
+
+    .tagline {
+      margin-top: 16px;
+      font-size: 15px;
+      font-weight: 300;
+      color: var(--muted);
+      letter-spacing: 0.05em;
+      border-left: 1px solid var(--gold-dim);
+      padding-left: 14px;
+    }
+
+    /* Divider */
+    .divider {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin: 32px 0;
+    }
+    .divider::before, .divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: linear-gradient(to right, transparent, var(--border), transparent);
+    }
+    .divider-symbol {
+      font-family: 'Playfair Display', serif;
+      color: var(--gold-dim);
       font-size: 18px;
-      font-weight: bold;
-      color: #e94560;
     }
-    .song-details {
-      color: #a8a8b3;
-      margin-top: 5px;
+
+    /* Search */
+    .search-wrap {
+      display: flex;
+      gap: 0;
+      margin-bottom: 48px;
+      animation: fadeUp 1s 0.2s ease both;
+      border: 1px solid var(--border);
+      background: var(--surface);
+    }
+
+    .search-wrap:focus-within {
+      border-color: var(--gold-dim);
+    }
+
+    input[type="text"] {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      padding: 16px 20px;
+      font-family: 'Cormorant Garamond', serif;
+      font-size: 17px;
+      font-weight: 400;
+      color: var(--cream);
+      letter-spacing: 0.02em;
+    }
+
+    input[type="text"]::placeholder {
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    button {
+      background: var(--gold);
+      color: var(--bg);
+      border: none;
+      padding: 16px 28px;
+      font-family: 'DM Mono', monospace;
+      font-size: 10px;
+      font-weight: 400;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      cursor: crosshair;
+      transition: background 0.2s;
+    }
+
+    button:hover {
+      background: var(--cream);
+    }
+
+    /* Status line */
+    #status {
+      font-family: 'DM Mono', monospace;
+      font-size: 11px;
+      color: var(--muted);
+      letter-spacing: 0.15em;
+      margin-bottom: 24px;
+      min-height: 18px;
+    }
+
+    /* Results */
+    #songs {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .song-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 20px 24px;
+      display: grid;
+      grid-template-columns: 32px 1fr auto;
+      align-items: center;
+      gap: 20px;
+      transition: background 0.2s, border-color 0.2s;
+      animation: fadeUp 0.4s ease both;
+      cursor: crosshair;
+    }
+
+    .song-card:hover {
+      background: var(--surface2);
+      border-color: var(--gold-dim);
+    }
+
+    .song-card:hover .song-num {
+      color: var(--gold);
+    }
+
+    .song-num {
+      font-family: 'DM Mono', monospace;
+      font-size: 11px;
+      color: var(--muted);
+      letter-spacing: 0.1em;
+      transition: color 0.2s;
+    }
+
+    .song-info {}
+
+    .song-title {
+      font-family: 'Playfair Display', serif;
+      font-size: 18px;
+      font-weight: 400;
+      color: var(--cream);
+      line-height: 1.2;
+      margin-bottom: 4px;
+    }
+
+    .song-meta {
+      font-size: 13px;
+      font-weight: 300;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+    }
+
+    .song-year {
+      font-family: 'DM Mono', monospace;
+      font-size: 11px;
+      color: var(--gold-dim);
+      letter-spacing: 0.1em;
+      white-space: nowrap;
+    }
+
+    /* Staggered animation */
+    .song-card:nth-child(1) { animation-delay: 0.0s; }
+    .song-card:nth-child(2) { animation-delay: 0.07s; }
+    .song-card:nth-child(3) { animation-delay: 0.14s; }
+    .song-card:nth-child(4) { animation-delay: 0.21s; }
+    .song-card:nth-child(5) { animation-delay: 0.28s; }
+
+    /* Footer */
+    footer {
+      margin-top: 80px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      font-family: 'DM Mono', monospace;
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    /* Animations */
+    @keyframes fadeDown {
+      from { opacity: 0; transform: translateY(-20px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(16px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Enter key hint */
+    .hint {
+      font-family: 'DM Mono', monospace;
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: 0.15em;
+      margin-top: 8px;
+      opacity: 0.6;
     }
   </style>
 </head>
 <body>
-  <h1>🎵 Music Player 2.0</h1>
-  <div style="margin: 20px 0;">
-  <input 
-    id="searchInput" 
-    type="text" 
-    placeholder="Search for a song..." 
-    style="padding: 10px; width: 300px; border-radius: 5px; border: none; font-size: 16px;"
-  />
-  <button 
-    onclick="searchSongs()" 
-    style="padding: 10px 20px; background-color: #e94560; color: white; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; margin-left: 10px;"
-  >
-    Search
-  </button>
-</div>
-  <div id="songs">
-    <div class="song-card">
-      <div class="song-title">Hotel California</div>
-      <div class="song-details">Eagles — 1976</div>
+  <div class="wrapper">
+    <header>
+      <div class="label">Est. 2025 — Song Intelligence</div>
+      <h1>Music<br><em>Player 2.0</em></h1>
+      <p class="tagline">Search any song. Discover chords. Play anything.</p>
+    </header>
+
+    <div class="divider"><span class="divider-symbol">✦</span></div>
+
+    <div class="search-wrap">
+      <input type="text" id="searchInput" placeholder="Enter a song or artist…" />
+      <button onclick="searchSongs()">Search</button>
     </div>
-    <div class="song-card">
-      <div class="song-title">Bohemian Rhapsody</div>
-      <div class="song-details">Queen — 1975</div>
-    </div>
-    <div class="song-card">
-      <div class="song-title">Stairway to Heaven</div>
-      <div class="song-details">Led Zeppelin — 1971</div>
-    </div>
+    <p class="hint">— press enter or click search</p>
+
+    <div id="status"></div>
+    <div id="songs"></div>
+
+    <footer>
+      <span>Music Player 2.0</span>
+      <span>Powered by iTunes API</span>
+    </footer>
   </div>
+
   <script>
-async function searchSongs() {
-  const query = document.getElementById('searchInput').value;
-  
-  if (!query) {
-    alert("Please enter a song name!");
-    return;
-  }
+    // Allow Enter key to search
+    document.getElementById('searchInput').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') searchSongs();
+    });
 
-  const songsDiv = document.getElementById('songs');
-  songsDiv.innerHTML = "<p>Searching...</p>";
+    async function searchSongs() {
+      const query = document.getElementById('searchInput').value.trim();
+      const status = document.getElementById('status');
+      const songsDiv = document.getElementById('songs');
 
-  const url = "https://itunes.apple.com/search?term=" + 
-    encodeURIComponent(query) + "&entity=song&limit=5&callback=?";
+      if (!query) {
+        status.textContent = '— please enter a song or artist name';
+        return;
+      }
 
-  const response = await fetch("https://itunes.apple.com/search?term=" + 
-    encodeURIComponent(query) + "&entity=song&limit=5");
-  const data = await response.json();
+      status.textContent = '— searching the archive…';
+      songsDiv.innerHTML = '';
 
-  songsDiv.innerHTML = "";
+      try {
+        const response = await fetch(
+          "https://itunes.apple.com/search?term=" +
+          encodeURIComponent(query) +
+          "&entity=song&limit=8"
+        );
+        const data = await response.json();
 
-  data.results.forEach(function(song) {
-    songsDiv.innerHTML += `
-      <div class="song-card">
-        <div class="song-title">${song.trackName}</div>
-        <div class="song-details">${song.artistName} — ${song.releaseDate ? song.releaseDate.substring(0, 4) : "Unknown"}</div>
-      </div>
-    `;
-  });
-}
-</script>
+        if (data.resultCount === 0) {
+          status.textContent = '— no results found for "' + query + '"';
+          return;
+        }
+
+        status.textContent = '— ' + data.resultCount + ' records found';
+
+        data.results.forEach(function(song, index) {
+          const year = song.releaseDate ? song.releaseDate.substring(0, 4) : '—';
+          const num = String(index + 1).padStart(2, '0');
+          const card = document.createElement('div');
+          card.className = 'song-card';
+          card.innerHTML = `
+            <span class="song-num">${num}</span>
+            <div class="song-info">
+              <div class="song-title">${song.trackName}</div>
+              <div class="song-meta">${song.artistName} &nbsp;·&nbsp; ${song.collectionName || '—'}</div>
+            </div>
+            <span class="song-year">${year}</span>
+          `;
+          songsDiv.appendChild(card);
+        });
+
+      } catch (error) {
+        status.textContent = '— connection error: ' + error.message;
+      }
+    }
+  </script>
 </body>
 </html>
