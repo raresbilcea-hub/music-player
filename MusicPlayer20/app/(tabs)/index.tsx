@@ -1,7 +1,9 @@
 import { StyleSheet, Text, View, TextInput, TouchableOpacity, FlatList, ActivityIndicator } from 'react-native';
 import { useState } from 'react';
+import { useRouter } from 'expo-router';
 
 export default function HomeScreen() {
+  const router = useRouter();
   const [query, setQuery] = useState('');
   const [songs, setSongs] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -50,14 +52,17 @@ export default function HomeScreen() {
         data={songs}
         keyExtractor={(item, index) => index.toString()}
         renderItem={({ item, index }) => (
-          <View style={styles.songCard}>
+          <TouchableOpacity style={styles.songCard} onPress={() => router.push({
+  pathname: '/(tabs)/song',
+  params: { title: item.title, artist: item.artist, album: item.album, year: item.year, genre: item.genre, duration: item.duration }
+})}>
             <Text style={styles.songNum}>{String(index + 1).padStart(2, '0')}</Text>
             <View style={styles.songInfo}>
               <Text style={styles.songTitle}>{item.title}</Text>
               <Text style={styles.songMeta}>{item.artist} · {item.album}</Text>
             </View>
             <Text style={styles.songYear}>{item.year}</Text>
-          </View>
+          </TouchableOpacity>
         )}
       />
     </View>
