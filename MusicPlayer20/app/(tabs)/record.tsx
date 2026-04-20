@@ -1,31 +1,28 @@
 import { StyleSheet, Text, View, TouchableOpacity } from 'react-native';
 import { useState } from 'react';
-import { Audio } from 'expo-av';
+import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
 
 export default function RecordScreen() {
-  const [recording, setRecording] = useState(null);
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [isRecording, setIsRecording] = useState(false);
   const [status, setStatus] = useState('Tap to identify a song');
   const [result, setResult] = useState(null);
 
   async function startRecording() {
     try {
-      await Audio.requestPermissionsAsync();
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-      });
+      const permission = await AudioModule.requestRecordingPermissionsAsync();
+      if (!permission.granted) {
+        setStatus('Microphone permission denied');
+        return;
+      }
 
       setStatus('Listening...');
       setIsRecording(true);
       setResult(null);
 
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
-      setRecording(recording);
-
-      setTimeout(() => stopRecording(recording), 10000);
+      await audioRecorder.prepareToRecordAsync();
+      await audioRecorder.record();
+      setTimeout(() => stopAndIdentify(), 10000);
 
     } catch (error) {
       setStatus('Error: ' + error.message);
@@ -33,20 +30,44 @@ export default function RecordScreen() {
     }
   }
 
-  async function stopRecording(rec) {
+  async function stopAndIdentify() {
     try {
       setStatus('Identifying song...');
       setIsRecording(false);
 
-      const currentRecording = rec || recording;
-      await currentRecording.stopAndUnloadAsync();
-      const uri = currentRecording.getURI();
+      await audioRecorder.stop();
+      const uri = audioRecorder.uri;
 
-      setStatus('Audio captured!');
-      setResult({ message: 'Audio recorded successfully! Song identification coming soon.' });
+      const formData = new FormData();
+      formData.append('api_token', process.env.EXPO_PUBLIC_AUDD_API_KEY);
+      formData.append('return', 'spotify,apple_music');
+      formData.append('file', {
+        uri: uri,
+        type: 'audio/m4a',
+        name: 'recording.m4a',
+      });
+
+      const response = await fetch('https://api.audd.io/', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (data.result) {
+        setResult({
+          title: data.result.title,
+          artist: data.result.artist,
+          album: data.result.album,
+          year: data.result.release_date ? data.result.release_date.substring(0, 4) : '—',
+        });
+        setStatus('Song identified!');
+      } else {
+        setStatus('Song not recognized. Try again.');
+      }
 
     } catch (error) {
-      setStatus('Error stopping: ' + error.message);
+      setStatus('Error: ' + error.message);
     }
   }
 
@@ -59,19 +80,21 @@ export default function RecordScreen() {
       <View style={styles.centerArea}>
         <TouchableOpacity
           style={[styles.recordBtn, isRecording && styles.recordBtnActive]}
-          onPress={isRecording ? () => stopRecording(null) : startRecording}
+          onPress={isRecording ? stopAndIdentify : startRecording}
         >
           <Text style={styles.recordIcon}>{isRecording ? '■' : '●'}</Text>
         </TouchableOpacity>
 
         <Text style={styles.status}>{status}</Text>
-        {isRecording && <Text style={styles.timer}>Recording for 10 seconds...</Text>}
+        {isRecording && <Text style={styles.timer}>Recording... tap to stop</Text>}
       </View>
 
       {result && (
         <View style={styles.resultCard}>
-          <Text style={styles.resultLabel}>RESULT</Text>
-          <Text style={styles.resultText}>{result.message}</Text>
+          <Text style={styles.resultLabel}>IDENTIFIED</Text>
+          <Text style={styles.resultTitle}>{result.title}</Text>
+          <Text style={styles.resultArtist}>{result.artist}</Text>
+          <Text style={styles.resultMeta}>{result.album} · {result.year}</Text>
         </View>
       )}
     </View>
@@ -105,10 +128,12 @@ const styles = StyleSheet.create({
   resultCard: {
     backgroundColor: '#16130e',
     borderWidth: 1,
-    borderColor: '#2a2318',
-    padding: 20,
+    borderColor: '#c9a84c',
+    padding: 24,
     marginBottom: 40,
   },
-  resultLabel: { color: '#8a6f32', fontSize: 9, letterSpacing: 2, marginBottom: 8 },
-  resultText: { color: '#e8dfc8', fontSize: 16 },
+  resultLabel: { color: '#8a6f32', fontSize: 9, letterSpacing: 2, marginBottom: 12 },
+  resultTitle: { color: '#e8dfc8', fontSize: 24, fontWeight: 'bold', marginBottom: 4 },
+  resultArtist: { color: '#c9a84c', fontSize: 16, marginBottom: 4 },
+  resultMeta: { color: '#6b6254', fontSize: 13 },
 });

@@ -1,13 +1,13 @@
-import { StyleSheet, Text, View, TextInput, TouchableOpacity, FlatList, ActivityIndicator } from 'react-native';
+import { StyleSheet, Text, View, TextInput, TouchableOpacity, FlatList, ActivityIndicator, Image } from 'react-native';
 import { useState } from 'react';
 import { useRouter } from 'expo-router';
 
 export default function HomeScreen() {
-  const router = useRouter();
   const [query, setQuery] = useState('');
   const [songs, setSongs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState('');
+  const router = useRouter();
 
   async function searchSongs() {
     if (!query) return;
@@ -23,6 +23,21 @@ export default function HomeScreen() {
       setStatus('Connection error');
     }
     setLoading(false);
+  }
+
+  function openSong(song) {
+    router.push({
+      pathname: '/song',
+      params: {
+        title: song.title,
+        artist: song.artist,
+        album: song.album,
+        year: song.year,
+        genre: song.genre,
+        duration: song.duration,
+        artwork: song.artwork,
+      }
+    });
   }
 
   return (
@@ -46,17 +61,19 @@ export default function HomeScreen() {
       </View>
 
       {status ? <Text style={styles.status}>— {status}</Text> : null}
-      {loading ? <ActivityIndicator color="#c9a84c" /> : null}
+      {loading ? <ActivityIndicator color="#c9a84c" style={{ marginBottom: 16 }} /> : null}
 
       <FlatList
         data={songs}
         keyExtractor={(item, index) => index.toString()}
         renderItem={({ item, index }) => (
-          <TouchableOpacity style={styles.songCard} onPress={() => router.push({
-  pathname: '/(tabs)/song',
-  params: { title: item.title, artist: item.artist, album: item.album, year: item.year, genre: item.genre, duration: item.duration }
-})}>
+          <TouchableOpacity style={styles.songCard} onPress={() => openSong(item)}>
             <Text style={styles.songNum}>{String(index + 1).padStart(2, '0')}</Text>
+            {item.artwork ? (
+              <Image source={{ uri: item.artwork }} style={styles.artwork} />
+            ) : (
+              <View style={styles.artworkPlaceholder} />
+            )}
             <View style={styles.songInfo}>
               <Text style={styles.songTitle}>{item.title}</Text>
               <Text style={styles.songMeta}>{item.artist} · {item.album}</Text>
@@ -136,6 +153,21 @@ const styles = StyleSheet.create({
     color: '#6b6254',
     fontSize: 11,
     width: 28,
+  },
+  artwork: {
+    width: 44,
+    height: 44,
+    marginRight: 12,
+    borderWidth: 1,
+    borderColor: '#2a2318',
+  },
+  artworkPlaceholder: {
+    width: 44,
+    height: 44,
+    marginRight: 12,
+    backgroundColor: '#16130e',
+    borderWidth: 1,
+    borderColor: '#2a2318',
   },
   songInfo: {
     flex: 1,
