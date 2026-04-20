@@ -177,8 +177,6 @@
     .song-card:nth-child(6) { animation-delay: 0.35s; }
     .song-card:nth-child(7) { animation-delay: 0.42s; }
     .song-card:nth-child(8) { animation-delay: 0.49s; }
-
-    /* FAVOURITES SECTION */
     #favSection { margin-top: 48px; display: none; }
     .fav-header {
       font-family: 'DM Mono', monospace;
@@ -188,7 +186,6 @@
       text-transform: uppercase;
       margin-bottom: 16px;
     }
-
     footer {
       margin-top: 80px;
       padding-top: 24px;
@@ -202,8 +199,6 @@
       justify-content: space-between;
     }
     .hint { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); letter-spacing: 0.15em; margin-top: 8px; opacity: 0.6; }
-
-    /* DETAIL PANEL */
     .overlay {
       position: fixed;
       inset: 0;
@@ -283,7 +278,6 @@
       margin-bottom: 8px;
     }
     .coming-soon-text { font-size: 14px; color: var(--muted); font-style: italic; }
-
     @keyframes fadeDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
     @keyframes fadeUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
   </style>
@@ -295,27 +289,21 @@
       <h1>Music<br><em>Player 2.0</em></h1>
       <p class="tagline">Search any song. Discover chords. Play anything.</p>
     </header>
-
     <div class="divider"><span class="divider-symbol">✦</span></div>
-
     <div class="search-wrap">
       <input type="text" id="searchInput" placeholder="Enter a song or artist…" />
       <button onclick="searchSongs()">Search</button>
     </div>
     <p class="hint">— press enter or click search</p>
-
     <div id="status"></div>
     <div id="songs"></div>
-
-    <!-- Favourites Section -->
     <div id="favSection">
       <div class="fav-header">— Favourites</div>
       <div id="favList"></div>
     </div>
-
     <footer>
       <span>Music Player 2.0</span>
-      <span>Powered by iTunes API</span>
+      <span>Powered by your own server</span>
     </footer>
   </div>
 
@@ -361,11 +349,11 @@
     function toggleFav(event, song, btn) {
       event.stopPropagation();
       const exists = favourites.find(function(f) {
-        return f.trackName === song.trackName;
+        return f.title === song.title;
       });
       if (exists) {
         favourites = favourites.filter(function(f) {
-          return f.trackName !== song.trackName;
+          return f.title !== song.title;
         });
         btn.textContent = '♡';
         btn.classList.remove('active');
@@ -387,17 +375,16 @@
       favSection.style.display = 'block';
       favList.innerHTML = '';
       favourites.forEach(function(song) {
-        const year = song.releaseDate ? song.releaseDate.substring(0, 4) : '—';
         const div = document.createElement('div');
         div.className = 'song-card';
         div.innerHTML = `
           <span class="song-num">♥</span>
-          <img class="song-artwork" src="${song.artworkUrl100 || ''}" onerror="this.style.visibility='hidden'" />
+          <img class="song-artwork" src="${song.artwork || ''}" onerror="this.style.visibility='hidden'" />
           <div class="song-info">
-            <div class="song-title">${song.trackName}</div>
-            <div class="song-meta">${song.artistName} &nbsp;·&nbsp; ${song.collectionName || '—'}</div>
+            <div class="song-title">${song.title}</div>
+            <div class="song-meta">${song.artist} &nbsp;·&nbsp; ${song.album || '—'}</div>
           </div>
-          <span class="song-year">${year}</span>
+          <span class="song-year">${song.year || '—'}</span>
           <span></span>
         `;
         div.addEventListener('click', function() { openDetail(song); });
@@ -406,17 +393,14 @@
     }
 
     function openDetail(song) {
-      const artwork = song.artworkUrl100 ? song.artworkUrl100.replace('100x100', '600x600') : '';
-      const year = song.releaseDate ? song.releaseDate.substring(0, 4) : '—';
-      const mins = Math.floor(song.trackTimeMillis / 60000);
-      const secs = Math.floor((song.trackTimeMillis % 60000) / 1000).toString().padStart(2, '0');
+      const artwork = song.artwork ? song.artwork.replace('100x100', '600x600') : '';
       document.getElementById('detailArtwork').src = artwork;
-      document.getElementById('detailTitle').textContent = song.trackName;
-      document.getElementById('detailArtist').textContent = song.artistName;
-      document.getElementById('detailAlbum').textContent = song.collectionName || '—';
-      document.getElementById('detailYear').textContent = year;
-      document.getElementById('detailGenre').textContent = song.primaryGenreName || '—';
-      document.getElementById('detailDuration').textContent = mins + ':' + secs;
+      document.getElementById('detailTitle').textContent = song.title;
+      document.getElementById('detailArtist').textContent = song.artist;
+      document.getElementById('detailAlbum').textContent = song.album || '—';
+      document.getElementById('detailYear').textContent = song.year || '—';
+      document.getElementById('detailGenre').textContent = song.genre || '—';
+      document.getElementById('detailDuration').textContent = song.duration || '—';
       document.getElementById('overlay').classList.add('open');
       document.getElementById('detailPanel').classList.add('open');
     }
@@ -438,20 +422,17 @@
       songsDiv.innerHTML = '';
       try {
         const response = await fetch(
-          "https://itunes.apple.com/search?term=" +
-          encodeURIComponent(query) +
-          "&entity=song&limit=8"
+          "http://localhost:3000/search?q=" +
+          encodeURIComponent(query)
         );
         const data = await response.json();
-        if (data.resultCount === 0) {
+        if (data.count === 0) {
           status.textContent = '— no results found for "' + query + '"';
           return;
         }
-        status.textContent = '— ' + data.resultCount + ' records found';
-        data.results.forEach(function(song, index) {
-          const year = song.releaseDate ? song.releaseDate.substring(0, 4) : '—';
+        status.textContent = '— ' + data.count + ' records found';
+        data.songs.forEach(function(song, index) {
           const num = String(index + 1).padStart(2, '0');
-          const artwork = song.artworkUrl100 || '';
           const card = document.createElement('div');
           card.className = 'song-card';
           const favBtn = document.createElement('span');
@@ -462,12 +443,12 @@
           });
           card.innerHTML = `
             <span class="song-num">${num}</span>
-            <img class="song-artwork" src="${artwork}" onerror="this.style.visibility='hidden'" />
+            <img class="song-artwork" src="${song.artwork || ''}" onerror="this.style.visibility='hidden'" />
             <div class="song-info">
-              <div class="song-title">${song.trackName}</div>
-              <div class="song-meta">${song.artistName} &nbsp;·&nbsp; ${song.collectionName || '—'}</div>
+              <div class="song-title">${song.title}</div>
+              <div class="song-meta">${song.artist} &nbsp;·&nbsp; ${song.album || '—'}</div>
             </div>
-            <span class="song-year">${year}</span>
+            <span class="song-year">${song.year || '—'}</span>
           `;
           card.appendChild(favBtn);
           card.addEventListener('click', function() { openDetail(song); });

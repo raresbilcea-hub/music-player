@@ -1,7 +1,9 @@
 const express = require('express');
 const axios = require('axios');
+const cors = require('cors');
 const app = express();
 const port = 3000;
+app.use(cors());
 
 app.get('/', function(req, res) {
   res.send('Music Player 2.0 server is running!');
