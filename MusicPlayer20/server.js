@@ -74,18 +74,15 @@ app.post('/identify', async function(req, res) {
 
     console.log('Step 2: Generating chord chart with OpenAI...');
 
-    var systemPrompt = 'You are a world-class musician. Generate chord charts in JSON with these fields: title, artist, confidence, musicalKey, tempo, capo, sections. Each section has label and lines. Each line has lyrics and chords array. Each chord has chord name and position number.';
+    const systemPrompt = `You are a world-class musician and transcriptionist. Generate chord charts as a JSON object with EXACTLY these top-level fields: title (string), artist (string), musicalKey (string e.g. "G major"), tempo (number BPM), capo (number, 0 if none), sections (array). Each section has: label (string e.g. "Verse 1", "Chorus", "Bridge") and lines (array). Each line has: lyrics (string) and chords (array of {chord: string, position: number} where position is the 0-based character index in the lyrics string where the chord falls). Include ALL sections of the song — every verse, chorus, pre-chorus, bridge, and outro. Do not truncate. Respond ONLY with a single valid JSON object.`;
 
-    var userPrompt;
-    if (songInfo) {
-      userPrompt = 'Generate a full chord chart for "' + songInfo.title + '" by ' + songInfo.artist + '. Include all sections with real lyrics and chords. Respond ONLY with valid JSON.';
-    } else {
-      userPrompt = 'Generate a placeholder chord chart for an unidentified song. Use title "Unknown Song" and artist "Unknown Artist". Respond ONLY with valid JSON.';
-    }
+    const userPrompt = songInfo
+      ? `Generate a complete, accurate chord chart for "${songInfo.title}" by ${songInfo.artist}. Include every section with real lyrics and accurate chords. Do not skip or summarize any section.`
+      : 'Generate a chord chart for an unknown song. Use title "Unknown Song" and artist "Unknown Artist". Create a simple blues structure with lyrics.';
 
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      max_tokens: 2000,
+      model: 'gpt-4o',
+      max_tokens: 4096,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: systemPrompt },
@@ -93,7 +90,12 @@ app.post('/identify', async function(req, res) {
       ]
     });
 
-    const chart = JSON.parse(completion.choices[0].message.content);
+    let chart = JSON.parse(completion.choices[0].message.content);
+    // Normalize: unwrap if OpenAI nested the chart under a "chart" key
+    if (chart.chart && typeof chart.chart === 'object' && !Array.isArray(chart.chart)) {
+      chart = chart.chart;
+    }
+    if (!Array.isArray(chart.sections)) chart.sections = [];
 
     res.json({
       identified: !!songInfo,
