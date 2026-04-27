@@ -5,13 +5,27 @@ import {
   TouchableOpacity,
   ScrollView,
   Animated,
+  Platform,
 } from 'react-native';
 import { useState, useRef, useEffect } from 'react';
 import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
 import * as FileSystem from 'expo-file-system/legacy';
 
+// ─── Design tokens ────────────────────────────────────────────────────────────
+
+const MONO     = Platform.OS === 'ios' ? 'Courier New' : 'monospace';
+const GOLD     = '#c9a84c';
+const GOLD_DIM = '#8a6f32';
+const BG       = '#0e0c09';
+const CREAM    = '#e8dfc8';
+const MUTED    = '#6b6254';
+const BORDER   = '#232018';
+const RED      = '#c0392b';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
 type Chord = { chord: string; position: number };
-type Line = { lyrics: string; chords?: Chord[] };
+type Line  = { lyrics: string; chords?: Chord[] };
 type Section = { label: string; lines?: Line[] };
 type ChordChart = {
   title: string;
@@ -21,72 +35,143 @@ type ChordChart = {
   capo?: number | string;
   sections: Section[];
 };
-type IdentifyResult = {
-  identified: boolean;
-  chart: ChordChart;
-};
+type IdentifyResult = { identified: boolean; chart: ChordChart };
+type StatusKey = 'idle' | 'listening' | 'processing' | 'identifying'
+               | 'identified' | 'generated' | 'error';
+
+// ─── buildChordLine ───────────────────────────────────────────────────────────
+// Places each chord name at its character-index position above the lyric line.
+// Both chord and lyric rows use the same monospace font so positions align.
 
 function buildChordLine(chords: Chord[], lyrics: string): string {
   if (!chords?.length) return '';
   const sorted = [...chords].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-  let result = '';
-  for (const item of sorted) {
-    const pos = item.position ?? 0;
-    while (result.length < pos) result += ' ';
-    result += item.chord + ' ';
+  let out = '';
+  for (const c of sorted) {
+    const pos = c.position ?? 0;
+    while (out.length < pos) out += ' ';
+    out += c.chord + ' ';
   }
-  return result.trimEnd();
+  return out.trimEnd();
 }
+
+// ─── AnimatedDots ─────────────────────────────────────────────────────────────
+
+function AnimatedDots({ active }: { active: boolean }) {
+  const [dots, setDots] = useState('');
+  useEffect(() => {
+    if (!active) { setDots(''); return; }
+    const id = setInterval(
+      () => setDots(d => (d.length >= 3 ? '' : d + '.')),
+      480,
+    );
+    return () => clearInterval(id);
+  }, [active]);
+  return <Text style={{ color: GOLD }}>{dots}</Text>;
+}
+
+// ─── Pill ─────────────────────────────────────────────────────────────────────
+
+function Pill({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={pill.wrap}>
+      <Text style={pill.label}>{label}</Text>
+      <Text style={pill.value}>{value}</Text>
+    </View>
+  );
+}
+
+const pill = StyleSheet.create({
+  wrap: {
+    backgroundColor: '#191610',
+    borderWidth: 1,
+    borderColor: '#2e2618',
+    borderRadius: 4,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    alignItems: 'center',
+    minWidth: 64,
+  },
+  label: {
+    color: GOLD_DIM,
+    fontSize: 8,
+    letterSpacing: 2,
+    marginBottom: 4,
+  },
+  value: {
+    color: CREAM,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+});
+
+// ─── RecordScreen ─────────────────────────────────────────────────────────────
 
 export default function RecordScreen() {
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
-  const [isRecording, setIsRecording] = useState(false);
-  const [status, setStatus] = useState('Tap to identify a song');
-  const [result, setResult] = useState<IdentifyResult | null>(null);
+  const [isRecording, setIsRecording]   = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [statusKey, setStatusKey]       = useState<StatusKey>('idle');
+  const [errorMsg, setErrorMsg]         = useState('');
+  const [result, setResult]             = useState<IdentifyResult | null>(null);
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
-  const pulseLoop = useRef<Animated.CompositeAnimation | null>(null);
+  const pulseRef  = useRef<Animated.CompositeAnimation | null>(null);
+  const fadeAnim  = useRef(new Animated.Value(0)).current;
 
+  // Record button pulse when recording
   useEffect(() => {
     if (isRecording) {
-      pulseLoop.current = Animated.loop(
+      pulseRef.current = Animated.loop(
         Animated.sequence([
-          Animated.timing(pulseAnim, { toValue: 1.18, duration: 700, useNativeDriver: true }),
-          Animated.timing(pulseAnim, { toValue: 1, duration: 700, useNativeDriver: true }),
-        ])
+          Animated.timing(pulseAnim, { toValue: 1.16, duration: 650, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1,    duration: 650, useNativeDriver: true }),
+        ]),
       );
-      pulseLoop.current.start();
+      pulseRef.current.start();
     } else {
-      pulseLoop.current?.stop();
+      pulseRef.current?.stop();
       Animated.timing(pulseAnim, { toValue: 1, duration: 200, useNativeDriver: true }).start();
     }
   }, [isRecording]);
 
+  // Fade-in chart when it arrives
+  useEffect(() => {
+    if (result?.chart) {
+      fadeAnim.setValue(0);
+      Animated.timing(fadeAnim, {
+        toValue: 1, duration: 600, delay: 80, useNativeDriver: true,
+      }).start();
+    }
+  }, [result]);
+
   async function startRecording() {
     try {
-      const permission = await AudioModule.requestRecordingPermissionsAsync();
-      if (!permission.granted) { setStatus('Microphone permission denied'); return; }
+      const perm = await AudioModule.requestRecordingPermissionsAsync();
+      if (!perm.granted) { setStatusKey('error'); setErrorMsg('Microphone permission denied'); return; }
       await AudioModule.setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
-      setStatus('Listening...');
-      setIsRecording(true);
       setResult(null);
+      setIsRecording(true);
+      setStatusKey('listening');
       await audioRecorder.prepareToRecordAsync();
       await audioRecorder.record();
       setTimeout(() => stopAndIdentify(), 10000);
-    } catch (error: any) {
-      setStatus('Error: ' + error.message);
+    } catch (e: any) {
+      setStatusKey('error');
+      setErrorMsg(e.message);
       setIsRecording(false);
     }
   }
 
   async function stopAndIdentify() {
     try {
-      setStatus('Processing...');
       setIsRecording(false);
+      setIsProcessing(true);
+      setStatusKey('processing');
       await audioRecorder.stop();
       const uri = audioRecorder.uri;
-      if (!uri) { setStatus('No audio recorded'); return; }
-      setStatus('Identifying song...');
+      if (!uri) { setStatusKey('error'); setErrorMsg('No audio recorded'); setIsProcessing(false); return; }
+      setStatusKey('identifying');
       const base64Audio = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
       const response = await fetch('http://localhost:3000/identify', {
         method: 'POST',
@@ -94,306 +179,270 @@ export default function RecordScreen() {
         body: JSON.stringify({ audioBase64: base64Audio, mimeType: 'audio/m4a' }),
       });
       const data = await response.json();
-      if (data.error) { setStatus('Error: ' + data.error); return; }
+      setIsProcessing(false);
+      if (data.error) { setStatusKey('error'); setErrorMsg(data.error); return; }
       setResult(data);
-      setStatus(data.identified ? 'Song identified!' : 'Chart generated');
-    } catch (error: any) {
-      setStatus('Error: ' + error.message);
+      setStatusKey(data.identified ? 'identified' : 'generated');
+    } catch (e: any) {
+      setIsProcessing(false);
+      setStatusKey('error');
+      setErrorMsg(e.message);
     }
   }
 
   const chart = result?.chart;
+  const slideY = fadeAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] });
 
   return (
-    <View style={styles.root}>
+    <View style={s.root}>
+
+      {/* ── Scrollable area ─────────────────────────────────────────────── */}
       <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={styles.content}
+        style={s.scroll}
+        contentContainerStyle={s.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {/* Page header */}
-        <View style={styles.headerBlock}>
-          <Text style={styles.headingMain}>Identify</Text>
-          <Text style={styles.headingAccent}>a Song</Text>
-          <Text style={styles.tagline}>Play music near your device</Text>
-        </View>
+        {/* Idle header — hidden once chart loads */}
+        {!chart && (
+          <View style={s.idleHeader}>
+            <Text style={s.idleMain}>Identify</Text>
+            <Text style={s.idleAccent}>a Song.</Text>
+            <Text style={s.idleTagline}>Hold your device near the music</Text>
+          </View>
+        )}
 
-        {/* Record button */}
-        <View style={styles.recordArea}>
-          <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
-            <TouchableOpacity
-              style={[styles.recordBtn, isRecording && styles.recordBtnActive]}
-              onPress={isRecording ? stopAndIdentify : startRecording}
-              activeOpacity={0.85}
-            >
-              <Text style={[styles.recordIcon, isRecording && styles.recordIconActive]}>
-                {isRecording ? '■' : '●'}
-              </Text>
-            </TouchableOpacity>
-          </Animated.View>
-          <Text style={styles.statusText}>{status}</Text>
-          {isRecording && <Text style={styles.hintText}>tap to stop early</Text>}
-        </View>
-
-        {/* Chord chart */}
+        {/* ── Chord chart ─────────────────────────────────────────────── */}
         {chart && (
-          <View style={styles.chartCard}>
-            <Text style={styles.badgeText}>
-              {result?.identified ? 'IDENTIFIED' : 'GENERATED CHART'}
-            </Text>
-            <Text style={styles.chartTitle}>{chart.title ?? 'Unknown'}</Text>
-            <Text style={styles.chartArtist}>{chart.artist ?? 'Unknown Artist'}</Text>
+          <Animated.View style={{ opacity: fadeAnim, transform: [{ translateY: slideY }] }}>
 
-            <View style={styles.pillRow}>
-              {chart.musicalKey ? (
-                <View style={styles.pill}>
-                  <Text style={styles.pillLabel}>KEY</Text>
-                  <Text style={styles.pillValue}>{chart.musicalKey}</Text>
-                </View>
-              ) : null}
-              {chart.tempo ? (
-                <View style={styles.pill}>
-                  <Text style={styles.pillLabel}>BPM</Text>
-                  <Text style={styles.pillValue}>{chart.tempo}</Text>
-                </View>
-              ) : null}
-              {chart.capo !== undefined && chart.capo !== null ? (
-                <View style={styles.pill}>
-                  <Text style={styles.pillLabel}>CAPO</Text>
-                  <Text style={styles.pillValue}>{chart.capo === 0 ? 'None' : `Fret ${chart.capo}`}</Text>
-                </View>
-              ) : null}
+            {/* Source badge */}
+            <Text style={s.sourceBadge}>
+              {result?.identified ? '✦  IDENTIFIED' : '✦  GENERATED'}
+            </Text>
+
+            {/* Title / artist */}
+            <Text style={s.songTitle}>{chart.title}</Text>
+            <Text style={s.songArtist}>{chart.artist}</Text>
+
+            {/* Pill row */}
+            <View style={s.pillRow}>
+              {chart.musicalKey ? <Pill label="KEY"  value={chart.musicalKey} /> : null}
+              {chart.tempo      ? <Pill label="BPM"  value={String(chart.tempo)} /> : null}
+              {chart.capo != null
+                ? <Pill label="CAPO" value={chart.capo === 0 ? 'None' : `Fret ${chart.capo}`} />
+                : null}
             </View>
 
-            <View style={styles.divider} />
-
+            {/* Sections */}
             {(chart.sections ?? []).map((section, si) => (
-              <View key={si} style={styles.section}>
-                <View style={styles.sectionHeader}>
-                  <View style={styles.sectionBar} />
-                  <Text style={styles.sectionLabel}>
-                    {(section.label ?? '').toUpperCase()}
-                  </Text>
+              <View key={si} style={s.section}>
+
+                {/* Label + extending gold rule */}
+                <View style={s.sectionHeaderRow}>
+                  <Text style={s.sectionLabel}>{(section.label ?? '').toUpperCase()}</Text>
+                  <View style={s.sectionRule} />
                 </View>
 
+                {/* Chord + lyric lines */}
                 {(section.lines ?? []).map((line, li) => {
-                  const hasChords = line.chords && line.chords.length > 0;
-                  const chordLine = hasChords
-                    ? buildChordLine(line.chords!, line.lyrics ?? '')
-                    : null;
+                  const hasChords = (line.chords?.length ?? 0) > 0;
+                  const cl = hasChords ? buildChordLine(line.chords!, line.lyrics ?? '') : null;
+                  const hasLyrics = !!line.lyrics?.trim();
+                  if (!cl && !hasLyrics) return null;
                   return (
-                    <View key={li} style={styles.lineBlock}>
-                      {chordLine ? (
-                        <Text style={styles.chordLine}>{chordLine}</Text>
-                      ) : null}
-                      {line.lyrics ? (
-                        <Text style={styles.lyricLine}>{line.lyrics}</Text>
-                      ) : null}
+                    <View key={li} style={s.lineBlock}>
+                      {cl        ? <Text style={s.chordLine}>{cl}</Text>   : null}
+                      {hasLyrics ? <Text style={s.lyricLine}>{line.lyrics}</Text> : null}
                     </View>
                   );
                 })}
               </View>
             ))}
-          </View>
+          </Animated.View>
         )}
+
+        {/* Spacer so content isn't hidden behind the fixed bottom bar */}
+        <View style={{ height: 180 }} />
       </ScrollView>
+
+      {/* ── Fixed bottom bar ────────────────────────────────────────────── */}
+      <View style={s.bottomBar}>
+
+        {/* Status */}
+        <View style={s.statusRow}>
+          {statusKey === 'listening' && (
+            <Text style={s.statusListening}>
+              Listening<AnimatedDots active={isRecording} />
+            </Text>
+          )}
+          {statusKey === 'processing'  && <Text style={s.statusMuted}>Processing...</Text>}
+          {statusKey === 'identifying' && <Text style={s.statusMuted}>Identifying song...</Text>}
+          {statusKey === 'identified'  && <Text style={s.statusGold}>Song identified!</Text>}
+          {statusKey === 'generated'   && <Text style={s.statusMuted}>Chart generated</Text>}
+          {statusKey === 'error'       && <Text style={s.statusError}>{errorMsg}</Text>}
+          {isRecording && <Text style={s.hintText}>tap to stop early</Text>}
+        </View>
+
+        {/* Record button */}
+        <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
+          <TouchableOpacity
+            style={[s.recordBtn, isRecording && s.recordBtnActive]}
+            onPress={isRecording ? stopAndIdentify : startRecording}
+            disabled={isProcessing}
+            activeOpacity={0.8}
+          >
+            <View style={[s.recordBtnInner, isRecording && s.recordBtnInnerActive]}>
+              <Text style={[s.recordIcon, isRecording && s.recordIconActive]}>
+                {isRecording ? '■' : '⬤'}
+              </Text>
+            </View>
+          </TouchableOpacity>
+        </Animated.View>
+
+      </View>
     </View>
   );
 }
 
-const GOLD = '#c9a84c';
-const GOLD_DIM = '#8a6f32';
-const BG = '#0e0c09';
-const BG_CARD = '#16130e';
-const CREAM = '#e8dfc8';
-const MUTED = '#6b6254';
-const BORDER = '#2a2318';
-const RED = '#e24b4a';
 
-const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: BG,
-  },
-  scroll: {
-    flex: 1,
-  },
-  content: {
-    paddingHorizontal: 24,
-    paddingTop: 64,
-    paddingBottom: 60,
-    flexGrow: 1,
-  },
+// ─── Styles ───────────────────────────────────────────────────────────────────
 
-  headerBlock: {
-    marginBottom: 8,
-  },
-  headingMain: {
-    color: CREAM,
-    fontSize: 48,
-    fontWeight: 'bold',
-    lineHeight: 52,
-  },
-  headingAccent: {
-    color: GOLD,
-    fontSize: 48,
-    fontStyle: 'italic',
-    lineHeight: 52,
-    marginBottom: 8,
-  },
-  tagline: {
-    color: MUTED,
-    fontSize: 14,
-  },
+const s = StyleSheet.create({
 
-  recordArea: {
-    alignItems: 'center',
-    paddingVertical: 40,
-  },
-  recordBtn: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    backgroundColor: BG_CARD,
-    borderWidth: 2,
-    borderColor: GOLD,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 20,
-    shadowColor: GOLD,
-    shadowOpacity: 0.2,
-    shadowRadius: 20,
-    shadowOffset: { width: 0, height: 0 },
-  },
-  recordBtnActive: {
-    borderColor: RED,
-    backgroundColor: '#1e0e0e',
-    shadowColor: RED,
-    shadowOpacity: 0.3,
-  },
-  recordIcon: {
-    color: GOLD,
-    fontSize: 40,
-  },
-  recordIconActive: {
-    color: RED,
-  },
-  statusText: {
-    color: MUTED,
-    fontSize: 14,
-    textAlign: 'center',
-    marginBottom: 6,
-  },
-  hintText: {
-    color: GOLD_DIM,
-    fontSize: 12,
-    textAlign: 'center',
-  },
+  root:   { flex: 1, backgroundColor: BG },
+  scroll: { flex: 1 },
+  scrollContent: { paddingTop: 68, paddingHorizontal: 24, flexGrow: 1 },
 
-  chartCard: {
-    backgroundColor: BG_CARD,
-    borderWidth: 1,
-    borderColor: BORDER,
-    borderRadius: 4,
-    overflow: 'hidden',
-  },
-  badgeText: {
+  // ── Idle header ──────────────────────────────────────────────────────────
+  idleHeader:  { paddingTop: 12, paddingBottom: 40 },
+  idleMain:    { color: CREAM, fontSize: 52, fontWeight: 'bold',   lineHeight: 58 },
+  idleAccent:  { color: GOLD,  fontSize: 52, fontStyle: 'italic',  lineHeight: 58, marginBottom: 14 },
+  idleTagline: { color: MUTED, fontSize: 14 },
+
+  // ── Chart ────────────────────────────────────────────────────────────────
+  sourceBadge: {
     color: GOLD_DIM,
     fontSize: 9,
-    letterSpacing: 2.5,
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 10,
-  },
-  chartTitle: {
-    color: CREAM,
-    fontSize: 26,
-    fontWeight: 'bold',
-    paddingHorizontal: 20,
-    lineHeight: 30,
-    marginBottom: 4,
-  },
-  chartArtist: {
-    color: GOLD,
-    fontSize: 16,
-    paddingHorizontal: 20,
-    marginBottom: 16,
-  },
-
-  pillRow: {
-    flexDirection: 'row',
-    gap: 8,
-    paddingHorizontal: 20,
+    letterSpacing: 3.5,
     marginBottom: 20,
-    flexWrap: 'wrap',
   },
-  pill: {
-    backgroundColor: '#1f1c14',
-    borderWidth: 1,
-    borderColor: BORDER,
-    borderRadius: 3,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    alignItems: 'center',
-    minWidth: 56,
-  },
-  pillLabel: {
-    color: GOLD_DIM,
-    fontSize: 8,
-    letterSpacing: 1.5,
-    marginBottom: 2,
-  },
-  pillValue: {
+  songTitle: {
     color: CREAM,
-    fontSize: 13,
-    fontWeight: '600',
+    fontSize: 34,
+    fontWeight: '800',
+    lineHeight: 38,
+    marginBottom: 6,
+  },
+  songArtist: {
+    color: GOLD,
+    fontSize: 19,
+    fontStyle: 'italic',
+    marginBottom: 22,
   },
 
-  divider: {
-    height: 1,
-    backgroundColor: BORDER,
-  },
+  pillRow: { flexDirection: 'row', gap: 8, marginBottom: 32, flexWrap: 'wrap' },
 
-  section: {
-    paddingTop: 16,
-    paddingBottom: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: BORDER,
-  },
-  sectionHeader: {
+  // ── Sections ─────────────────────────────────────────────────────────────
+  section: { marginBottom: 30 },
+  sectionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 12,
-    paddingHorizontal: 20,
-    gap: 8,
-  },
-  sectionBar: {
-    width: 3,
-    height: 12,
-    backgroundColor: GOLD,
-    borderRadius: 2,
+    marginBottom: 14,
   },
   sectionLabel: {
-    color: GOLD_DIM,
+    color: GOLD,
     fontSize: 10,
-    letterSpacing: 2,
-    fontWeight: '600',
+    fontWeight: '700',
+    letterSpacing: 3.5,
+  },
+  sectionRule: {
+    flex: 1,
+    height: 1,
+    backgroundColor: GOLD,
+    opacity: 0.2,
+    marginLeft: 12,
   },
 
-  lineBlock: {
-    paddingHorizontal: 20,
-    marginBottom: 10,
-  },
+  // ── Lines ─────────────────────────────────────────────────────────────────
+  lineBlock: { marginBottom: 14 },
   chordLine: {
     color: GOLD,
+    fontFamily: MONO,
     fontSize: 13,
-    fontFamily: 'Courier',
-    letterSpacing: 0.2,
     lineHeight: 18,
+    letterSpacing: 0.1,
   },
   lyricLine: {
     color: CREAM,
-    fontSize: 14,
+    fontFamily: MONO,
+    fontSize: 13,
     lineHeight: 20,
+  },
+
+  // ── Bottom bar ────────────────────────────────────────────────────────────
+  bottomBar: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    paddingBottom: 40,
+    paddingTop: 14,
+    alignItems: 'center',
+    backgroundColor: BG,
+    borderTopWidth: 1,
+    borderTopColor: BORDER,
+  },
+
+  statusRow: {
+    alignItems: 'center',
+    minHeight: 40,
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  statusListening: { color: GOLD,  fontSize: 14, letterSpacing: 0.5 },
+  statusMuted:     { color: MUTED, fontSize: 13 },
+  statusGold:      { color: GOLD,  fontSize: 13 },
+  statusError:     { color: RED,   fontSize: 13, textAlign: 'center', paddingHorizontal: 24 },
+  hintText:        { color: MUTED, fontSize: 11, marginTop: 5 },
+
+  // ── Record button ─────────────────────────────────────────────────────────
+  recordBtn: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: GOLD,
+    justifyContent: 'center',
+    alignItems: 'center',
+    // gold glow
+    shadowColor: GOLD,
+    shadowOpacity: 0.55,
+    shadowRadius: 22,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 12,
+  },
+  recordBtnActive: {
+    backgroundColor: RED,
+    shadowColor: RED,
+    shadowOpacity: 0.7,
+  },
+  recordBtnInner: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(0,0,0,0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  recordBtnInnerActive: {
+    backgroundColor: 'rgba(0,0,0,0.2)',
+  },
+  recordIcon: {
+    color: BG,
+    fontSize: 26,
+    lineHeight: 30,
+  },
+  recordIconActive: {
+    color: '#fff',
+    fontSize: 20,
   },
 });
