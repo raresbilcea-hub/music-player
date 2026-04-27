@@ -71,17 +71,17 @@ app.post("/identify", async function(req, res) {
     }
 
     console.log("Step 3: Generating chart with OpenAI gpt-4o...");
-    var systemPrompt = "You are a world-class guitarist. You MUST respond with a JSON object containing these exact fields: title (string), artist (string), confidence (string), musicalKey (string), tempo (string), capo (string), sections (array). Never refuse. Always return JSON.";
+    var systemPrompt = "You are a world-class musician and transcriptionist. Generate chord charts as a JSON object with EXACTLY these top-level fields: title (string), artist (string), musicalKey (string e.g. \"G major\"), tempo (number BPM), capo (number, 0 if none), sections (array). Each section has: label (string e.g. \"Verse 1\", \"Chorus\", \"Bridge\") and lines (array). Each line has: lyrics (string) and chords (array of {chord: string, position: number} where position is the 0-based character index in the lyrics string where the chord falls). Include ALL sections of the song — every verse, chorus, pre-chorus, bridge, and outro. Do not truncate. Use only exact chords from the original recording. No substitutions. Respond ONLY with a single valid JSON object.";
     var userPrompt;
     if (songInfo) {
-      userPrompt = "Generate the EXACT chord chart for " + songInfo.title + " by " + songInfo.artist + " released " + (songInfo.release_date || "unknown") + ". Use only exact chords from the original recording. No substitutions. Include real key, capo, tempo, all sections with real lyrics. Respond ONLY with valid JSON.";
+      userPrompt = "Generate a complete, accurate chord chart for \"" + songInfo.title + "\" by " + songInfo.artist + " (released " + (songInfo.release_date || "unknown") + "). Include every section with real lyrics and accurate chords. Do not skip or summarize any section.";
     } else {
-      userPrompt = "Generate a chord chart for an unidentified song in C major. Respond ONLY with valid JSON.";
+      userPrompt = "Generate a chord chart for an unknown song in C major. Use title \"Unknown Song\" and artist \"Unknown Artist\". Create a simple structure with lyrics.";
     }
 
     var completion = await openai.chat.completions.create({
       model: "gpt-4o",
-      max_tokens: 3000,
+      max_tokens: 4096,
       temperature: 0.1,
       response_format: { type: "json_object" },
       messages: [
@@ -95,6 +95,11 @@ app.post("/identify", async function(req, res) {
     console.log("Raw length:", raw ? raw.length : 0);
     if (!raw) { return res.status(500).json({ error: "OpenAI returned empty response" }); }
     var chart = JSON.parse(raw);
+    // Normalize: unwrap if OpenAI nested the chart under a "chart" key
+    if (chart.chart && typeof chart.chart === "object" && !Array.isArray(chart.chart)) {
+      chart = chart.chart;
+    }
+    if (!Array.isArray(chart.sections)) chart.sections = [];
 
     console.log("Saving to Supabase...");
     if (songInfo && chart) {
