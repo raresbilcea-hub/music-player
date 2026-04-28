@@ -173,7 +173,7 @@ export default function RecordScreen() {
       if (!uri) { setStatusKey('error'); setErrorMsg('No audio recorded'); setIsProcessing(false); return; }
       setStatusKey('identifying');
       const base64Audio = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
-      const response = await fetch('http://localhost:3000/identify', {
+      const response = await fetch('https://music-player-production-524a.up.railway.app/identify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ audioBase64: base64Audio, mimeType: 'audio/m4a' }),
