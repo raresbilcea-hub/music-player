@@ -238,28 +238,30 @@ app.post("/identify", async function(req, res) {
 
 // PUT /chords { title, artist, sections, musicalKey, tempo, capo } — user correction, marks verified
 app.put("/chords", async function(req, res) {
+  res.setHeader("Content-Type", "application/json");
   var title = req.body.title, artist = req.body.artist;
   var sections = req.body.sections, musicalKey = req.body.musicalKey;
   var tempo = req.body.tempo, capo = req.body.capo;
-  if (!title || !artist || !sections) return res.status(400).json({ error: "title, artist and sections required" });
+  if (!title || !artist) return res.status(400).json({ error: "title and artist required" });
+  if (!Array.isArray(sections)) return res.status(400).json({ error: "sections must be an array" });
   try {
     console.log("PUT /chords: saving corrected chart for", title, "by", artist);
     var saveResult = await supabase.from("chord_charts").upsert({
       title:       title,
       artist:      artist,
-      musical_key: musicalKey,
-      tempo:       tempo,
-      capo:        capo,
+      musical_key: musicalKey  || null,
+      tempo:       tempo       || null,
+      capo:        capo        != null ? capo : null,
       sections:    sections,
       source:      "user_corrected",
       verified:    true,
     }, { onConflict: "title,artist" });
     if (saveResult.error) throw new Error(saveResult.error.message);
     console.log("PUT /chords: saved OK");
-    res.json({ success: true });
+    return res.json({ success: true });
   } catch(e) {
     console.error("PUT /chords error:", e.message);
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
