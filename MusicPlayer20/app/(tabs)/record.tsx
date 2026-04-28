@@ -10,10 +10,10 @@ import {
 import { useState, useRef, useEffect } from 'react';
 import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
 import * as FileSystem from 'expo-file-system/legacy';
+import { LineView } from '@/components/LineView';
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
 
-const MONO     = Platform.OS === 'ios' ? 'Courier New' : 'monospace';
 const GOLD     = '#c9a84c';
 const GOLD_DIM = '#8a6f32';
 const BG       = '#0e0c09';
@@ -39,21 +39,6 @@ type IdentifyResult = { identified: boolean; chart: ChordChart };
 type StatusKey = 'idle' | 'listening' | 'processing' | 'identifying'
                | 'identified' | 'generated' | 'error';
 
-// ─── buildChordLine ───────────────────────────────────────────────────────────
-// Places each chord name at its character-index position above the lyric line.
-// Both chord and lyric rows use the same monospace font so positions align.
-
-function buildChordLine(chords: Chord[], lyrics: string): string {
-  if (!chords?.length) return '';
-  const sorted = [...chords].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-  let out = '';
-  for (const c of sorted) {
-    const pos = c.position ?? 0;
-    while (out.length < pos) out += ' ';
-    out += c.chord + ' ';
-  }
-  return out.trimEnd();
-}
 
 // ─── AnimatedDots ─────────────────────────────────────────────────────────────
 
@@ -244,18 +229,9 @@ export default function RecordScreen() {
                 </View>
 
                 {/* Chord + lyric lines */}
-                {(section.lines ?? []).map((line, li) => {
-                  const hasChords = (line.chords?.length ?? 0) > 0;
-                  const cl = hasChords ? buildChordLine(line.chords!, line.lyrics ?? '') : null;
-                  const hasLyrics = !!line.lyrics?.trim();
-                  if (!cl && !hasLyrics) return null;
-                  return (
-                    <View key={li} style={s.lineBlock}>
-                      {cl        ? <Text style={s.chordLine}>{cl}</Text>   : null}
-                      {hasLyrics ? <Text style={s.lyricLine}>{line.lyrics}</Text> : null}
-                    </View>
-                  );
-                })}
+                {(section.lines ?? []).map((line, li) => (
+                  <LineView key={li} line={line} />
+                ))}
               </View>
             ))}
           </Animated.View>
@@ -361,22 +337,6 @@ const s = StyleSheet.create({
     backgroundColor: GOLD,
     opacity: 0.2,
     marginLeft: 12,
-  },
-
-  // ── Lines ─────────────────────────────────────────────────────────────────
-  lineBlock: { marginBottom: 14 },
-  chordLine: {
-    color: GOLD,
-    fontFamily: MONO,
-    fontSize: 13,
-    lineHeight: 18,
-    letterSpacing: 0.1,
-  },
-  lyricLine: {
-    color: CREAM,
-    fontFamily: MONO,
-    fontSize: 13,
-    lineHeight: 20,
   },
 
   // ── Bottom bar ────────────────────────────────────────────────────────────
