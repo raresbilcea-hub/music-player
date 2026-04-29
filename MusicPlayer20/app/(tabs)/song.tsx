@@ -63,7 +63,7 @@ type ChordModal = {
 
 function clone<T>(x: T): T { return JSON.parse(JSON.stringify(x)); }
 
-// ─── Pill ─────────────────────────────────────────────────────────────────────
+// ─── Pill / EditPill ──────────────────────────────────────────────────────────
 
 function Pill({ label, value }: { label: string; value: string }) {
   return (
@@ -73,10 +73,40 @@ function Pill({ label, value }: { label: string; value: string }) {
     </View>
   );
 }
+
+function EditPill({
+  label, value, onChangeText, keyboard, placeholder,
+}: {
+  label:        string;
+  value:        string;
+  onChangeText: (v: string) => void;
+  keyboard?:    'default' | 'numeric' | 'decimal-pad';
+  placeholder?: string;
+}) {
+  return (
+    <View style={ps.editWrap}>
+      <Text style={ps.label}>{label}</Text>
+      <TextInput
+        style={ps.input}
+        value={value}
+        onChangeText={onChangeText}
+        keyboardType={keyboard ?? 'default'}
+        autoCapitalize="none"
+        autoCorrect={false}
+        selectTextOnFocus
+        placeholder={placeholder ?? '—'}
+        placeholderTextColor={MUTED}
+      />
+    </View>
+  );
+}
+
 const ps = StyleSheet.create({
-  wrap:  { backgroundColor: '#191610', borderWidth: 1, borderColor: '#2e2618', borderRadius: 4, paddingHorizontal: 14, paddingVertical: 8, alignItems: 'center', minWidth: 64 },
-  label: { color: GOLD_DIM, fontSize: 8,  letterSpacing: 2, marginBottom: 4 },
-  value: { color: CREAM,    fontSize: 14, fontWeight: '600' },
+  wrap:     { backgroundColor: '#191610', borderWidth: 1, borderColor: '#2e2618', borderRadius: 4, paddingHorizontal: 14, paddingVertical: 8, alignItems: 'center', minWidth: 64 },
+  editWrap: { backgroundColor: '#191610', borderWidth: 1, borderColor: GOLD_DIM,  borderRadius: 4, paddingHorizontal: 10, paddingVertical: 6,  alignItems: 'center', minWidth: 72 },
+  label:    { color: GOLD_DIM, fontSize: 8, letterSpacing: 2, marginBottom: 4 },
+  value:    { color: CREAM,    fontSize: 14, fontWeight: '600' },
+  input:    { color: GOLD,     fontSize: 14, fontWeight: '600', fontFamily: MONO, textAlign: 'center', minWidth: 52, padding: 0 },
 });
 
 // ─── EditLineView ─────────────────────────────────────────────────────────────
@@ -331,6 +361,18 @@ export default function SongScreen() {
     setDraft(next);
   }
 
+  function setDraftMeta(field: 'musicalKey' | 'tempo' | 'capo', raw: string) {
+    if (!draft) return;
+    setDraft(prev => {
+      if (!prev) return prev;
+      if (field === 'musicalKey') return { ...prev, musicalKey: raw };
+      const num = raw === '' ? undefined : Number(raw);
+      if (field === 'tempo') return { ...prev, tempo: isNaN(num as number) ? prev.tempo : num };
+      // capo: empty string → 0 (no capo)
+      return { ...prev, capo: (raw === '' || isNaN(num as number)) ? 0 : num };
+    });
+  }
+
   // ─────────────────────────────────────────────────────────────────────────────
 
   const display = editing ? draft : chart;
@@ -475,16 +517,41 @@ export default function SongScreen() {
               </>
             )}
 
-            {/* Pills */}
-            {!editing && (
-              <View style={s.pillRow}>
-                {display.musicalKey && <Pill label="KEY"  value={display.musicalKey} />}
-                {display.tempo      && <Pill label="BPM"  value={String(display.tempo)} />}
-                {display.capo != null && (
-                  <Pill label="CAPO" value={display.capo === 0 ? 'None' : `Fret ${display.capo}`} />
-                )}
-              </View>
-            )}
+            {/* Pills — read mode shows static pills, edit mode shows text inputs */}
+            <View style={s.pillRow}>
+              {editing ? (
+                <>
+                  <EditPill
+                    label="KEY"
+                    value={draft?.musicalKey ?? ''}
+                    onChangeText={v => setDraftMeta('musicalKey', v)}
+                    placeholder="D major"
+                  />
+                  <EditPill
+                    label="BPM"
+                    value={draft?.tempo != null ? String(draft.tempo) : ''}
+                    onChangeText={v => setDraftMeta('tempo', v)}
+                    keyboard="numeric"
+                    placeholder="120"
+                  />
+                  <EditPill
+                    label="CAPO"
+                    value={draft?.capo != null ? String(draft.capo) : ''}
+                    onChangeText={v => setDraftMeta('capo', v)}
+                    keyboard="numeric"
+                    placeholder="0"
+                  />
+                </>
+              ) : (
+                <>
+                  {display.musicalKey && <Pill label="KEY"  value={display.musicalKey} />}
+                  {display.tempo      && <Pill label="BPM"  value={String(display.tempo)} />}
+                  {display.capo != null && (
+                    <Pill label="CAPO" value={display.capo === 0 ? 'None' : `Fret ${display.capo}`} />
+                  )}
+                </>
+              )}
+            </View>
 
             {/* Sections */}
             {(display.sections ?? []).map((section, si) => (
