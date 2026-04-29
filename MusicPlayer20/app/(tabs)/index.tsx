@@ -1,16 +1,24 @@
 import { StyleSheet, Text, View, TextInput, TouchableOpacity, FlatList, ActivityIndicator, Image } from 'react-native';
 import { useState } from 'react';
 import { useRouter } from 'expo-router';
+import { addToHistory } from '@/lib/songHistory';
+import { shouldShowGate, consumeFreeAction } from '@/lib/freeGate';
+import { FreeGateModal } from '@/components/FreeGateModal';
 
 export default function HomeScreen() {
   const [query, setQuery] = useState('');
   const [songs, setSongs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState('');
+  const [gateVisible, setGateVisible] = useState(false);
   const router = useRouter();
 
   async function searchSongs() {
     if (!query) return;
+
+    // Gate check: show signup prompt if free action already used
+    if (await shouldShowGate()) { setGateVisible(true); return; }
+
     setLoading(true);
     setStatus('Searching...');
     setSongs([]);
@@ -19,32 +27,67 @@ export default function HomeScreen() {
       const data = await response.json();
       setSongs(data.songs);
       setStatus(`${data.count} records found`);
+      // Mark free action consumed after first successful search
+      await consumeFreeAction();
     } catch (error) {
       setStatus('Connection error');
     }
     setLoading(false);
   }
 
-  function openSong(song) {
-    router.push({
-      pathname: '/song',
+  async function openSong(song) {
+    await addToHistory({
+      title:   song.title,
+      artist:  song.artist,
+      album:   song.album,
+      year:    song.year,
+      genre:   song.genre,
+      artwork: song.artwork,
+    });
+    // navigate (not push) so the Songs tab gains focus and back goes to the history list
+    router.navigate({
+      pathname: '/(tabs)/song',
       params: {
-        title: song.title,
-        artist: song.artist,
-        album: song.album,
-        year: song.year,
-        genre: song.genre,
-        duration: song.duration,
-        artwork: song.artwork,
-      }
+        title:    song.title,
+        artist:   song.artist,
+        album:    song.album    ?? '',
+        year:     song.year     ?? '',
+        genre:    song.genre    ?? '',
+        duration: song.duration ?? '',
+        artwork:  song.artwork  ?? '',
+      },
     });
   }
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Music</Text>
-      <Text style={styles.titleItalic}>Player 2.0</Text>
-      <Text style={styles.tagline}>Search any song. Discover chords.</Text>
+      <FreeGateModal visible={gateVisible} />
+
+      {/* ── Hero ── */}
+      <Text style={styles.heroName}>Music Player 2.0</Text>
+      <Text style={styles.heroTagline}>Identify songs. Learn chords. Play music.</Text>
+
+      {/* ── Feature cards ── */}
+      <View style={styles.featureRow}>
+        <View style={styles.featureCard}>
+          <Text style={styles.featureEmoji}>🎸</Text>
+          <Text style={styles.featureLabel}>Learn{'\n'}Chords</Text>
+        </View>
+        <View style={styles.featureCard}>
+          <Text style={styles.featureEmoji}>📚</Text>
+          <Text style={styles.featureLabel}>Free{'\n'}Lessons</Text>
+        </View>
+      </View>
+      <View style={[styles.featureRow, { marginBottom: 32 }]}>
+        <View style={styles.featureCard}>
+          <Text style={styles.featureEmoji}>🎓</Text>
+          <Text style={styles.featureLabel}>Be a{'\n'}Student</Text>
+        </View>
+        <View style={styles.featureCard}>
+          <Text style={styles.featureEmoji}>🏫</Text>
+          <Text style={styles.featureLabel}>Be a{'\n'}Teacher</Text>
+        </View>
+      </View>
 
       <View style={styles.searchRow}>
         <TextInput
@@ -91,24 +134,46 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0e0c09',
     padding: 24,
-    paddingTop: 60,
+    paddingTop: 24,
   },
-  title: {
-    color: '#e8dfc8',
-    fontSize: 48,
-    fontWeight: 'bold',
-  },
-  titleItalic: {
+  heroName: {
     color: '#c9a84c',
-    fontSize: 48,
-    fontStyle: 'italic',
-    marginTop: -10,
+    fontSize: 36,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
+    marginBottom: 6,
   },
-  tagline: {
-    color: '#6b6254',
+  heroTagline: {
+    color: '#e8dfc8',
     fontSize: 14,
-    marginTop: 8,
-    marginBottom: 32,
+    lineHeight: 20,
+    marginBottom: 28,
+  },
+  featureRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 10,
+  },
+  featureCard: {
+    flex: 1,
+    backgroundColor: '#16130e',
+    borderWidth: 1,
+    borderColor: '#2a2318',
+    paddingVertical: 16,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+  },
+  featureEmoji: {
+    fontSize: 24,
+    marginBottom: 8,
+  },
+  featureLabel: {
+    color: '#e8dfc8',
+    fontSize: 11,
+    fontWeight: '600',
+    textAlign: 'center',
+    letterSpacing: 0.3,
+    lineHeight: 16,
   },
   searchRow: {
     flexDirection: 'row',

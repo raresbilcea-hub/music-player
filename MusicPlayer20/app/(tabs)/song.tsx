@@ -4,14 +4,18 @@ import {
   View,
   TouchableOpacity,
   ScrollView,
+  FlatList,
+  Image,
   ActivityIndicator,
   TextInput,
   Modal,
   Platform,
   KeyboardAvoidingView,
 } from 'react-native';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { useState, useEffect, useCallback } from 'react';
+import { getHistory, clearHistory, type HistorySong } from '@/lib/songHistory';
+import { useAuth } from '@/context/auth';
 import {
   LineView,
   buildChordLine,
@@ -23,6 +27,7 @@ import {
   type Chord,
   type Line,
 } from '@/components/LineView';
+import { ChordDiagramModal } from '@/components/ChordDiagram';
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
 
@@ -225,6 +230,145 @@ const el = StyleSheet.create({
   },
 });
 
+// ─── SongHistoryList ──────────────────────────────────────────────────────────
+// Shown when the Songs tab is opened with no title/artist params.
+
+function SongHistoryList() {
+  const router = useRouter();
+  const { user, signOut } = useAuth();
+  const [history, setHistory] = useState<HistorySong[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useFocusEffect(
+    useCallback(() => {
+      getHistory().then(h => { setHistory(h); setLoading(false); });
+    }, [])
+  );
+
+  async function handleClear() {
+    await clearHistory();
+    setHistory([]);
+  }
+
+  async function handleSignOut() {
+    await signOut();
+  }
+
+  function openSong(song: HistorySong) {
+    router.navigate({
+      pathname: '/(tabs)/song',
+      params: {
+        title:   song.title,
+        artist:  song.artist,
+        album:   song.album    ?? '',
+        year:    song.year     ?? '',
+        genre:   song.genre    ?? '',
+        artwork: song.artwork  ?? '',
+      },
+    });
+  }
+
+  if (loading) {
+    return (
+      <View style={hl.container}>
+        <ActivityIndicator color={GOLD} size="large" />
+      </View>
+    );
+  }
+
+  return (
+    <View style={hl.container}>
+
+      {/* Header */}
+      <View style={hl.header}>
+        <View>
+          <Text style={hl.title}>Songs</Text>
+          <Text style={hl.subtitle}>
+            {history.length > 0 ? `${history.length} in history` : 'Your history'}
+          </Text>
+        </View>
+        {history.length > 0 && (
+          <TouchableOpacity onPress={handleClear} activeOpacity={0.7}>
+            <Text style={hl.clearTxt}>CLEAR ALL</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+
+      {/* Account row */}
+      {user && (
+        <View style={hl.accountRow}>
+          <Text style={hl.accountEmail} numberOfLines={1}>{user.email}</Text>
+          <TouchableOpacity onPress={handleSignOut} activeOpacity={0.7}>
+            <Text style={hl.signOutTxt}>SIGN OUT</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      <View style={hl.divider} />
+
+      {history.length === 0 ? (
+        <View style={hl.empty}>
+          <Text style={hl.emptySym}>♪</Text>
+          <Text style={hl.emptyTitle}>No songs yet</Text>
+          <Text style={hl.emptySub}>
+            Songs you search on the Home tab or identify with the Record tab will appear here.
+          </Text>
+        </View>
+      ) : (
+        <FlatList
+          data={history}
+          keyExtractor={(item, i) => `${item.title}-${item.artist}-${i}`}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={{ paddingBottom: 40 }}
+          renderItem={({ item, index }) => (
+            <TouchableOpacity style={hl.card} onPress={() => openSong(item)} activeOpacity={0.8}>
+              <Text style={hl.num}>{String(index + 1).padStart(2, '0')}</Text>
+              {item.artwork
+                ? <Image source={{ uri: item.artwork }} style={hl.art} />
+                : <View style={hl.artPlaceholder}><Text style={hl.artNote}>♪</Text></View>
+              }
+              <View style={hl.info}>
+                <Text style={hl.songTitle}  numberOfLines={1}>{item.title}</Text>
+                <Text style={hl.songMeta}   numberOfLines={1}>
+                  {item.artist}{item.album ? ` · ${item.album}` : ''}
+                </Text>
+              </View>
+              {item.year ? <Text style={hl.year}>{item.year}</Text> : null}
+              <Text style={hl.chevron}>›</Text>
+            </TouchableOpacity>
+          )}
+        />
+      )}
+    </View>
+  );
+}
+
+const hl = StyleSheet.create({
+  container:      { flex: 1, backgroundColor: BG, paddingTop: 16, paddingHorizontal: 24 },
+  header:         { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 16 },
+  title:          { color: CREAM, fontSize: 32, fontWeight: 'bold' },
+  subtitle:       { color: MUTED, fontSize: 11, marginTop: 4 },
+  clearTxt:       { color: GOLD_DIM, fontSize: 10, letterSpacing: 2 },
+  accountRow:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10, marginBottom: 4 },
+  accountEmail:   { color: MUTED, fontSize: 12, flex: 1, marginRight: 16 },
+  signOutTxt:     { color: GOLD_DIM, fontSize: 10, letterSpacing: 2 },
+  divider:        { height: 1, backgroundColor: BORDER, marginBottom: 8 },
+  empty:          { flex: 1, alignItems: 'center', paddingTop: 60 },
+  emptySym:       { color: GOLD_DIM, fontSize: 40, marginBottom: 20 },
+  emptyTitle:     { color: CREAM, fontSize: 18, fontWeight: '600', marginBottom: 10 },
+  emptySub:       { color: MUTED, fontSize: 13, textAlign: 'center', lineHeight: 20, paddingHorizontal: 24 },
+  card:           { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: BORDER },
+  num:            { color: MUTED, fontSize: 11, width: 28 },
+  art:            { width: 44, height: 44, marginRight: 12, borderWidth: 1, borderColor: BORDER },
+  artPlaceholder: { width: 44, height: 44, marginRight: 12, backgroundColor: '#16130e', borderWidth: 1, borderColor: BORDER, justifyContent: 'center', alignItems: 'center' },
+  artNote:        { color: MUTED, fontSize: 16 },
+  info:           { flex: 1 },
+  songTitle:      { color: CREAM, fontSize: 15, fontWeight: '600', marginBottom: 3 },
+  songMeta:       { color: MUTED, fontSize: 12 },
+  year:           { color: GOLD_DIM, fontSize: 11, marginRight: 8 },
+  chevron:        { color: MUTED, fontSize: 20, lineHeight: 24 },
+});
+
 // ─── SongScreen ───────────────────────────────────────────────────────────────
 
 export default function SongScreen() {
@@ -237,15 +381,19 @@ export default function SongScreen() {
   const genre    = String(params.genre    ?? '');
   const duration = String(params.duration ?? '');
 
+  // No params → show the history list (tab's default state)
+  if (!title || !artist) return <SongHistoryList />;
+
   const [loadState, setLoadState] = useState<LoadState>('loading');
   const [chart,     setChart]     = useState<ChordChart | null>(null);
   const [errorMsg,  setErrorMsg]  = useState('');
 
-  const [editing,   setEditing]   = useState(false);
-  const [draft,     setDraft]     = useState<ChordChart | null>(null);
-  const [saving,    setSaving]    = useState(false);
-  const [saveError, setSaveError] = useState('');
-  const [modal,     setModal]     = useState<ChordModal | null>(null);
+  const [editing,      setEditing]      = useState(false);
+  const [draft,        setDraft]        = useState<ChordChart | null>(null);
+  const [saving,       setSaving]       = useState(false);
+  const [saveError,    setSaveError]    = useState('');
+  const [modal,        setModal]        = useState<ChordModal | null>(null);
+  const [chordDiagram, setChordDiagram] = useState<string | null>(null);
 
   // ── Bug fix: reset all state when the song changes ─────────────────────────
   useEffect(() => {
@@ -255,6 +403,7 @@ export default function SongScreen() {
     setModal(null);
     setSaveError('');
     setErrorMsg('');
+    setChordDiagram(null);
   }, [title, artist]);
 
   // ─── Network ───────────────────────────────────────────────────────────────
@@ -382,7 +531,13 @@ export default function SongScreen() {
       style={{ flex: 1, backgroundColor: BG }}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      {/* ── Chord modal ── */}
+      {/* ── Chord diagram modal ── */}
+      <ChordDiagramModal
+        chordName={chordDiagram}
+        onClose={() => setChordDiagram(null)}
+      />
+
+      {/* ── Chord edit modal ── */}
       <Modal transparent visible={!!modal} animationType="fade" onRequestClose={() => setModal(null)}>
         <TouchableOpacity style={mo.overlay} activeOpacity={1} onPress={() => setModal(null)}>
           <View style={mo.box}>
@@ -423,10 +578,13 @@ export default function SongScreen() {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        {/* Back */}
+        {/* Back — always returns to the history list, never to Home */}
         {!editing && (
-          <TouchableOpacity style={s.backBtn} onPress={() => router.back()}>
-            <Text style={s.backText}>← Back</Text>
+          <TouchableOpacity
+            style={s.backBtn}
+            onPress={() => router.navigate('/(tabs)/song')}
+          >
+            <Text style={s.backText}>← Songs</Text>
           </TouchableOpacity>
         )}
 
@@ -491,9 +649,14 @@ export default function SongScreen() {
         {loadState === 'found' && display && (
           <View>
 
-            {/* Verified badge */}
+            {/* Verified badge + quick edit shortcut */}
             {display.verified && !editing && (
-              <Text style={s.verifiedTxt}>✓  Verified by musician</Text>
+              <View style={s.verifiedRow}>
+                <Text style={s.verifiedTxt}>✓  Verified by musician</Text>
+                <TouchableOpacity onPress={startEdit} activeOpacity={0.7}>
+                  <Text style={s.verifiedEditLink}>EDIT CHORDS ↓</Text>
+                </TouchableOpacity>
+              </View>
             )}
 
             {/* Edit toolbar */}
@@ -567,7 +730,13 @@ export default function SongScreen() {
                   const hasLyrics = !!line.lyrics?.trim();
                   if (!hasChords && !hasLyrics) return null;
 
-                  if (!editing) return <LineView key={li} line={line} />;
+                  if (!editing) return (
+                    <LineView
+                      key={li}
+                      line={line}
+                      onChordPress={name => setChordDiagram(name)}
+                    />
+                  );
 
                   return (
                     <EditLineView
@@ -617,7 +786,7 @@ const mo = StyleSheet.create({
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: BG },
-  content:   { paddingHorizontal: 24, paddingTop: 64, paddingBottom: 80 },
+  content:   { paddingHorizontal: 24, paddingTop: 16, paddingBottom: 80 },
 
   backBtn:  { marginBottom: 28 },
   backText: { color: GOLD, fontSize: 16 },
@@ -649,7 +818,9 @@ const s = StyleSheet.create({
   generateBtn:   { backgroundColor: GOLD, paddingVertical: 14, paddingHorizontal: 32 },
   generateTxt:   { color: BG, fontSize: 11, fontWeight: '700', letterSpacing: 2.5 },
 
-  verifiedTxt: { color: GOLD, fontSize: 12, fontWeight: '700', letterSpacing: 1.5, marginBottom: 20 },
+  verifiedRow:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
+  verifiedTxt:     { color: GOLD, fontSize: 12, fontWeight: '700', letterSpacing: 1.5 },
+  verifiedEditLink:{ color: GOLD_DIM, fontSize: 10, letterSpacing: 1.5 },
 
   toolbar:      { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: BORDER },
   toolbarLabel: { color: GOLD_DIM, fontSize: 9, letterSpacing: 3 },

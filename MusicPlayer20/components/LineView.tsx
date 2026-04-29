@@ -1,4 +1,4 @@
-import { StyleSheet, Text, View, ScrollView, Platform } from 'react-native';
+import { StyleSheet, Text, View, ScrollView, TouchableOpacity, Platform } from 'react-native';
 
 // ─── Shared font metrics ──────────────────────────────────────────────────────
 // Both chord and lyric rows must use identical font metrics so position indices
@@ -16,7 +16,6 @@ export type Line  = { lyrics: string; chords?: Chord[] };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// Builds the chord string: each chord placed at its character-index position.
 export function buildChordLine(chords: Chord[], lyrics: string): string {
   if (!chords?.length) return '';
   const sorted = [...chords].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
@@ -29,14 +28,11 @@ export function buildChordLine(chords: Chord[], lyrics: string): string {
   return out.trimEnd();
 }
 
-// Pads the lyric with trailing spaces so it reaches at least the end of the
-// chord line — prevents the chord row from extending beyond the lyric row.
 export function buildDisplayLyric(chords: Chord[], lyrics: string): string {
   const cl = buildChordLine(chords, lyrics);
   return cl.length > lyrics.length ? lyrics.padEnd(cl.length, ' ') : lyrics;
 }
 
-// Right-most character extent across all chords (position + chord name length).
 export function chordExtent(chords: Chord[]): number {
   if (!chords?.length) return 0;
   return Math.max(...chords.map(c => (c.position ?? 0) + (c.chord?.length ?? 1)));
@@ -44,9 +40,15 @@ export function chordExtent(chords: Chord[]): number {
 
 // ─── LineView ─────────────────────────────────────────────────────────────────
 // Chord row + lyric row in a horizontal ScrollView.
-// The inner View has flexShrink:0 so long lines never wrap — they scroll instead.
+// Pass onChordPress to make each chord name tappable (e.g. to show a diagram).
 
-export function LineView({ line }: { line: Line }) {
+export function LineView({
+  line,
+  onChordPress,
+}: {
+  line:          Line;
+  onChordPress?: (chord: string) => void;
+}) {
   const chords    = line.chords ?? [];
   const hasChords = chords.length > 0;
   const hasLyrics = !!(line.lyrics?.trim());
@@ -57,6 +59,11 @@ export function LineView({ line }: { line: Line }) {
     ? buildDisplayLyric(chords, line.lyrics ?? '')
     : (line.lyrics ?? '');
 
+  // Width of the content area so all chords and lyrics fit without wrapping
+  const contentW = Math.max(cl.length, displayLyric.length) * CHAR_W + 8;
+
+  const sorted = [...chords].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+
   return (
     <ScrollView
       horizontal
@@ -64,10 +71,32 @@ export function LineView({ line }: { line: Line }) {
       nestedScrollEnabled
       style={lv.scroll}
     >
-      {/* flexShrink:0 prevents the View from being squeezed to its parent's width,
-          which would cause the Text children to wrap at spaces. */}
-      <View style={lv.inner}>
-        {hasChords && <Text style={lv.chordLine}>{cl}</Text>}
+      {/* flexShrink:0 prevents squeezing to parent width, which would cause wrapping */}
+      <View style={[lv.inner, { minWidth: contentW }]}>
+
+        {/* Chord row — each chord is an individually tappable cell */}
+        {hasChords && (
+          <View style={[lv.chordRow, { height: 19 }]}>
+            {sorted.map((c, i) => {
+              const left = (c.position ?? 0) * CHAR_W;
+              return (
+                <TouchableOpacity
+                  key={i}
+                  style={{ position: 'absolute', left }}
+                  onPress={onChordPress ? () => onChordPress(c.chord) : undefined}
+                  hitSlop={{ top: 4, bottom: 4, left: 2, right: 2 }}
+                  activeOpacity={onChordPress ? 0.6 : 1}
+                  disabled={!onChordPress}
+                >
+                  <Text style={onChordPress ? lv.chordTap : lv.chordStatic}>
+                    {c.chord}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
+
         <Text style={lv.lyricLine}>{displayLyric}</Text>
       </View>
     </ScrollView>
@@ -75,8 +104,10 @@ export function LineView({ line }: { line: Line }) {
 }
 
 const lv = StyleSheet.create({
-  scroll:    { marginBottom: 14 },
-  inner:     { flexShrink: 0 },
-  chordLine: { color: '#c9a84c', fontFamily: MONO, fontSize: FSIZE, lineHeight: 19, letterSpacing: 0 },
-  lyricLine: { color: '#e8dfc8', fontFamily: MONO, fontSize: FSIZE, lineHeight: 20 },
+  scroll:      { marginBottom: 14 },
+  inner:       { flexShrink: 0 },
+  chordRow:    { position: 'relative', marginBottom: 0 },
+  chordStatic: { color: '#c9a84c', fontFamily: MONO, fontSize: FSIZE, lineHeight: 19, letterSpacing: 0 },
+  chordTap:    { color: '#c9a84c', fontFamily: MONO, fontSize: FSIZE, lineHeight: 19, letterSpacing: 0, textDecorationLine: 'underline', textDecorationColor: '#8a6f32', textDecorationStyle: 'dotted' },
+  lyricLine:   { color: '#e8dfc8', fontFamily: MONO, fontSize: FSIZE, lineHeight: 20 },
 });

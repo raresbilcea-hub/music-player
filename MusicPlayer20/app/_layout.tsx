@@ -16,9 +16,8 @@ function RootLayoutNav() {
 
     const inAuthScreen = segments[0] === 'login' || segments[0] === 'register';
 
-    if (!session && !inAuthScreen) {
-      router.replace('/login');
-    } else if (session && inAuthScreen) {
+    // Only redirect away from auth screens when already signed in — never force login
+    if (session && inAuthScreen) {
       router.replace('/(tabs)');
     }
   }, [session, loading, segments, navigationState?.key]);

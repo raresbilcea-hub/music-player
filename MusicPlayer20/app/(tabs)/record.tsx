@@ -5,12 +5,15 @@ import {
   TouchableOpacity,
   ScrollView,
   Animated,
-  Platform,
+  Image,
 } from 'react-native';
 import { useState, useRef, useEffect } from 'react';
+import { useRouter } from 'expo-router';
 import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
 import * as FileSystem from 'expo-file-system/legacy';
-import { LineView } from '@/components/LineView';
+import { addToHistory } from '@/lib/songHistory';
+import { shouldShowGate, consumeFreeAction } from '@/lib/freeGate';
+import { FreeGateModal } from '@/components/FreeGateModal';
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
 
@@ -24,20 +27,31 @@ const RED      = '#c0392b';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Chord = { chord: string; position: number };
-type Line  = { lyrics: string; chords?: Chord[] };
-type Section = { label: string; lines?: Line[] };
-type ChordChart = {
-  title: string;
-  artist: string;
-  musicalKey?: string;
-  tempo?: number | string;
-  capo?: number | string;
-  sections: Section[];
+type SongInfo = {
+  title:         string;
+  artist:        string;
+  album?:        string;
+  release_date?: string;
+  apple_music?:  { artwork?: { url?: string } };
+  spotify?:      { album?: { images?: { url: string }[] } };
 };
-type IdentifyResult = { identified: boolean; chart: ChordChart };
+type ChordChart = {
+  title:       string;
+  artist:      string;
+  musicalKey?: string;
+  tempo?:      number | string;
+  capo?:       number | string;
+};
+type IdentifyResult = { identified: boolean; songInfo?: SongInfo; chart: ChordChart };
 type StatusKey = 'idle' | 'listening' | 'processing' | 'identifying'
-               | 'identified' | 'generated' | 'error';
+               | 'identified' | 'generated' | 'error' | 'saved';
+type RecordMode = 'identify' | 'live';
+
+function artworkUrl(songInfo?: SongInfo): string {
+  const am = songInfo?.apple_music?.artwork?.url;
+  if (am) return am.replace('{w}', '300').replace('{h}', '300');
+  return songInfo?.spotify?.album?.images?.[0]?.url ?? '';
+}
 
 
 // ─── AnimatedDots ─────────────────────────────────────────────────────────────
@@ -93,12 +107,15 @@ const pill = StyleSheet.create({
 // ─── RecordScreen ─────────────────────────────────────────────────────────────
 
 export default function RecordScreen() {
+  const router        = useRouter();
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [isRecording, setIsRecording]   = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [statusKey, setStatusKey]       = useState<StatusKey>('idle');
   const [errorMsg, setErrorMsg]         = useState('');
   const [result, setResult]             = useState<IdentifyResult | null>(null);
+  const [mode, setMode]                 = useState<RecordMode>('identify');
+  const [gateVisible, setGateVisible]   = useState(false);
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const pulseRef  = useRef<Animated.CompositeAnimation | null>(null);
@@ -131,6 +148,7 @@ export default function RecordScreen() {
   }, [result]);
 
   async function startRecording() {
+    if (await shouldShowGate()) { setGateVisible(true); return; }
     try {
       const perm = await AudioModule.requestRecordingPermissionsAsync();
       if (!perm.granted) { setStatusKey('error'); setErrorMsg('Microphone permission denied'); return; }
@@ -140,11 +158,28 @@ export default function RecordScreen() {
       setStatusKey('listening');
       await audioRecorder.prepareToRecordAsync();
       await audioRecorder.record();
-      setTimeout(() => stopAndIdentify(), 10000);
+      // In live mode record until the user stops manually — no auto-stop
+      if (mode === 'identify') setTimeout(() => stopAndIdentify(), 10000);
     } catch (e: any) {
       setStatusKey('error');
       setErrorMsg(e.message);
       setIsRecording(false);
+    }
+  }
+
+  async function stopAndSaveLive() {
+    try {
+      setIsRecording(false);
+      setIsProcessing(true);
+      setStatusKey('processing');
+      await audioRecorder.stop();
+      await consumeFreeAction();
+      setIsProcessing(false);
+      setStatusKey('saved');
+    } catch (e: any) {
+      setIsProcessing(false);
+      setStatusKey('error');
+      setErrorMsg(e.message);
     }
   }
 
@@ -166,6 +201,18 @@ export default function RecordScreen() {
       const data = await response.json();
       setIsProcessing(false);
       if (data.error) { setStatusKey('error'); setErrorMsg(data.error); return; }
+
+      // Save to history so Songs tab shows this song
+      const si = data.songInfo as SongInfo | undefined;
+      await addToHistory({
+        title:   data.chart?.title  ?? si?.title  ?? '',
+        artist:  data.chart?.artist ?? si?.artist ?? '',
+        album:   si?.album ?? '',
+        year:    si?.release_date ? si.release_date.substring(0, 4) : '',
+        artwork: artworkUrl(si),
+      });
+
+      await consumeFreeAction();
       setResult(data);
       setStatusKey(data.identified ? 'identified' : 'generated');
     } catch (e: any) {
@@ -175,11 +222,28 @@ export default function RecordScreen() {
     }
   }
 
-  const chart = result?.chart;
-  const slideY = fadeAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] });
+  const chart    = result?.chart;
+  const songInfo = result?.songInfo as SongInfo | undefined;
+  const artwork  = artworkUrl(songInfo);
+  const slideY   = fadeAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] });
+
+  function openChordChart() {
+    if (!chart) return;
+    router.navigate({
+      pathname: '/(tabs)/song',
+      params: {
+        title:   chart.title,
+        artist:  chart.artist,
+        album:   songInfo?.album   ?? '',
+        year:    songInfo?.release_date ? songInfo.release_date.substring(0, 4) : '',
+        artwork: artwork,
+      },
+    });
+  }
 
   return (
     <View style={s.root}>
+      <FreeGateModal visible={gateVisible} />
 
       {/* ── Scrollable area ─────────────────────────────────────────────── */}
       <ScrollView
@@ -187,53 +251,75 @@ export default function RecordScreen() {
         contentContainerStyle={s.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {/* Idle header — hidden once chart loads */}
-        {!chart && (
+        {/* Idle header — changes based on mode */}
+        {!chart && statusKey !== 'saved' && (
           <View style={s.idleHeader}>
-            <Text style={s.idleMain}>Identify</Text>
-            <Text style={s.idleAccent}>a Song.</Text>
-            <Text style={s.idleTagline}>Hold your device near the music</Text>
+            {mode === 'identify' ? (
+              <>
+                <Text style={s.idleMain}>Identify</Text>
+                <Text style={s.idleAccent}>a Song.</Text>
+                <Text style={s.idleTagline}>Hold your device near the music</Text>
+              </>
+            ) : (
+              <>
+                <Text style={s.idleMain}>Record</Text>
+                <Text style={s.idleAccent}>Live.</Text>
+                <Text style={s.idleTagline}>Capture your performance to share in Lessons</Text>
+              </>
+            )}
           </View>
         )}
 
-        {/* ── Chord chart ─────────────────────────────────────────────── */}
+        {/* Live recording saved confirmation */}
+        {statusKey === 'saved' && (
+          <View style={s.savedState}>
+            <Text style={s.savedSymbol}>✦</Text>
+            <Text style={s.savedTitle}>Recording saved!</Text>
+            <Text style={s.savedSub}>Your recording is ready to upload to the Community Videos section in Lessons.</Text>
+            <TouchableOpacity style={s.uploadBtn} activeOpacity={0.8} onPress={() => setStatusKey('idle')}>
+              <Text style={s.uploadBtnTxt}>UPLOAD TO LESSONS</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setStatusKey('idle')}>
+              <Text style={s.discardTxt}>Discard</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* ── Identified result card ──────────────────────────────── */}
         {chart && (
           <Animated.View style={{ opacity: fadeAnim, transform: [{ translateY: slideY }] }}>
-
-            {/* Source badge */}
             <Text style={s.sourceBadge}>
               {result?.identified ? '✦  IDENTIFIED' : '✦  GENERATED'}
             </Text>
 
-            {/* Title / artist */}
-            <Text style={s.songTitle}>{chart.title}</Text>
-            <Text style={s.songArtist}>{chart.artist}</Text>
-
-            {/* Pill row */}
-            <View style={s.pillRow}>
-              {chart.musicalKey ? <Pill label="KEY"  value={chart.musicalKey} /> : null}
-              {chart.tempo      ? <Pill label="BPM"  value={String(chart.tempo)} /> : null}
-              {chart.capo != null
-                ? <Pill label="CAPO" value={chart.capo === 0 ? 'None' : `Fret ${chart.capo}`} />
-                : null}
+            <View style={s.resultCard}>
+              {artwork
+                ? <Image source={{ uri: artwork }} style={s.resultArtwork} />
+                : <View style={s.resultArtworkPlaceholder}><Text style={s.resultArtworkNote}>♪</Text></View>
+              }
+              <View style={s.resultInfo}>
+                <Text style={s.resultTitle} numberOfLines={2}>{chart.title}</Text>
+                <Text style={s.resultArtist} numberOfLines={1}>{chart.artist}</Text>
+                {(chart.musicalKey || chart.tempo) && (
+                  <View style={s.resultPills}>
+                    {chart.musicalKey ? <Pill label="KEY" value={chart.musicalKey} /> : null}
+                    {chart.tempo      ? <Pill label="BPM" value={String(chart.tempo)} /> : null}
+                  </View>
+                )}
+              </View>
             </View>
 
-            {/* Sections */}
-            {(chart.sections ?? []).map((section, si) => (
-              <View key={si} style={s.section}>
+            <TouchableOpacity style={s.openChartBtn} onPress={openChordChart} activeOpacity={0.85}>
+              <Text style={s.openChartTxt}>OPEN CHORD CHART  →</Text>
+            </TouchableOpacity>
 
-                {/* Label + extending gold rule */}
-                <View style={s.sectionHeaderRow}>
-                  <Text style={s.sectionLabel}>{(section.label ?? '').toUpperCase()}</Text>
-                  <View style={s.sectionRule} />
-                </View>
-
-                {/* Chord + lyric lines */}
-                {(section.lines ?? []).map((line, li) => (
-                  <LineView key={li} line={line} />
-                ))}
-              </View>
-            ))}
+            <TouchableOpacity
+              style={s.recordAgainBtn}
+              onPress={() => { setResult(null); setStatusKey('idle'); }}
+              activeOpacity={0.7}
+            >
+              <Text style={s.recordAgainTxt}>Record another song</Text>
+            </TouchableOpacity>
           </Animated.View>
         )}
 
@@ -244,11 +330,32 @@ export default function RecordScreen() {
       {/* ── Fixed bottom bar ────────────────────────────────────────────── */}
       <View style={s.bottomBar}>
 
+        {/* Mode toggle */}
+        {!isRecording && !isProcessing && statusKey !== 'saved' && !chart && (
+          <View style={s.modeToggle}>
+            <TouchableOpacity
+              style={[s.modeBtn, mode === 'identify' && s.modeBtnActive]}
+              onPress={() => { setMode('identify'); setStatusKey('idle'); setResult(null); }}
+              activeOpacity={0.8}
+            >
+              <Text style={[s.modeTxt, mode === 'identify' && s.modeTxtActive]}>IDENTIFY</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.modeBtn, mode === 'live' && s.modeBtnLive]}
+              onPress={() => { setMode('live'); setStatusKey('idle'); setResult(null); }}
+              activeOpacity={0.8}
+            >
+              <Text style={[s.modeTxt, mode === 'live' && s.modeTxtLive]}>● RECORD LIVE</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
         {/* Status */}
         <View style={s.statusRow}>
           {statusKey === 'listening' && (
-            <Text style={s.statusListening}>
-              Listening<AnimatedDots active={isRecording} />
+            <Text style={mode === 'live' ? s.statusRed : s.statusListening}>
+              {mode === 'live' ? '● Recording live' : 'Listening'}
+              <AnimatedDots active={isRecording} />
             </Text>
           )}
           {statusKey === 'processing'  && <Text style={s.statusMuted}>Processing...</Text>}
@@ -256,24 +363,28 @@ export default function RecordScreen() {
           {statusKey === 'identified'  && <Text style={s.statusGold}>Song identified!</Text>}
           {statusKey === 'generated'   && <Text style={s.statusMuted}>Chart generated</Text>}
           {statusKey === 'error'       && <Text style={s.statusError}>{errorMsg}</Text>}
-          {isRecording && <Text style={s.hintText}>tap to stop early</Text>}
+          {isRecording && <Text style={s.hintText}>tap to stop</Text>}
         </View>
 
-        {/* Record button */}
-        <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
-          <TouchableOpacity
-            style={[s.recordBtn, isRecording && s.recordBtnActive]}
-            onPress={isRecording ? stopAndIdentify : startRecording}
-            disabled={isProcessing}
-            activeOpacity={0.8}
-          >
-            <View style={[s.recordBtnInner, isRecording && s.recordBtnInnerActive]}>
-              <Text style={[s.recordIcon, isRecording && s.recordIconActive]}>
-                {isRecording ? '■' : '⬤'}
-              </Text>
-            </View>
-          </TouchableOpacity>
-        </Animated.View>
+        {/* Record button — hidden on saved screen and result card */}
+        {statusKey !== 'saved' && !chart && (
+          <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
+            <TouchableOpacity
+              style={[s.recordBtn, isRecording && s.recordBtnActive]}
+              onPress={isRecording
+                ? (mode === 'live' ? stopAndSaveLive : stopAndIdentify)
+                : startRecording}
+              disabled={isProcessing}
+              activeOpacity={0.8}
+            >
+              <View style={[s.recordBtnInner, isRecording && s.recordBtnInnerActive]}>
+                <Text style={[s.recordIcon, isRecording && s.recordIconActive]}>
+                  {isRecording ? '■' : '⬤'}
+                </Text>
+              </View>
+            </TouchableOpacity>
+          </Animated.View>
+        )}
 
       </View>
     </View>
@@ -287,7 +398,7 @@ const s = StyleSheet.create({
 
   root:   { flex: 1, backgroundColor: BG },
   scroll: { flex: 1 },
-  scrollContent: { paddingTop: 68, paddingHorizontal: 24, flexGrow: 1 },
+  scrollContent: { paddingTop: 24, paddingHorizontal: 24, flexGrow: 1 },
 
   // ── Idle header ──────────────────────────────────────────────────────────
   idleHeader:  { paddingTop: 12, paddingBottom: 40 },
@@ -295,49 +406,60 @@ const s = StyleSheet.create({
   idleAccent:  { color: GOLD,  fontSize: 52, fontStyle: 'italic',  lineHeight: 58, marginBottom: 14 },
   idleTagline: { color: MUTED, fontSize: 14 },
 
-  // ── Chart ────────────────────────────────────────────────────────────────
+  // ── Identified result card ────────────────────────────────────────────────
   sourceBadge: {
     color: GOLD_DIM,
     fontSize: 9,
     letterSpacing: 3.5,
-    marginBottom: 20,
+    marginBottom: 16,
   },
-  songTitle: {
-    color: CREAM,
-    fontSize: 34,
-    fontWeight: '800',
-    lineHeight: 38,
-    marginBottom: 6,
+  resultCard: {
+    flexDirection:   'row',
+    backgroundColor: '#16130e',
+    borderWidth:     1,
+    borderColor:     BORDER,
+    padding:         16,
+    marginBottom:    20,
+    gap:             16,
+    alignItems:      'flex-start',
   },
-  songArtist: {
-    color: GOLD,
-    fontSize: 19,
-    fontStyle: 'italic',
-    marginBottom: 22,
+  resultArtwork: {
+    width:       88,
+    height:      88,
+    borderWidth: 1,
+    borderColor: BORDER,
+    flexShrink:  0,
   },
+  resultArtworkPlaceholder: {
+    width:           88,
+    height:          88,
+    borderWidth:     1,
+    borderColor:     BORDER,
+    backgroundColor: '#0e0c09',
+    justifyContent:  'center',
+    alignItems:      'center',
+    flexShrink:      0,
+  },
+  resultArtworkNote: { color: MUTED, fontSize: 28 },
+  resultInfo:        { flex: 1 },
+  resultTitle:       { color: CREAM, fontSize: 20, fontWeight: '700', lineHeight: 26, marginBottom: 4 },
+  resultArtist:      { color: GOLD,  fontSize: 14, fontStyle: 'italic', marginBottom: 12 },
+  resultPills:       { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
 
-  pillRow: { flexDirection: 'row', gap: 8, marginBottom: 32, flexWrap: 'wrap' },
-
-  // ── Sections ─────────────────────────────────────────────────────────────
-  section: { marginBottom: 30 },
-  sectionHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 14,
-  },
-  sectionLabel: {
-    color: GOLD,
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 3.5,
-  },
-  sectionRule: {
-    flex: 1,
-    height: 1,
+  openChartBtn: {
     backgroundColor: GOLD,
-    opacity: 0.2,
-    marginLeft: 12,
+    paddingVertical:   16,
+    alignItems:        'center',
+    marginBottom:      14,
   },
+  openChartTxt: {
+    color:         BG,
+    fontSize:      12,
+    fontWeight:    '700',
+    letterSpacing: 2,
+  },
+  recordAgainBtn: { alignItems: 'center', paddingVertical: 8 },
+  recordAgainTxt: { color: MUTED, fontSize: 13 },
 
   // ── Bottom bar ────────────────────────────────────────────────────────────
   bottomBar: {
@@ -359,11 +481,36 @@ const s = StyleSheet.create({
     justifyContent: 'center',
     marginBottom: 16,
   },
-  statusListening: { color: GOLD,  fontSize: 14, letterSpacing: 0.5 },
+  statusListening: { color: GOLD, fontSize: 14, letterSpacing: 0.5 },
+  statusRed:       { color: RED,  fontSize: 14, letterSpacing: 0.5 },
   statusMuted:     { color: MUTED, fontSize: 13 },
   statusGold:      { color: GOLD,  fontSize: 13 },
   statusError:     { color: RED,   fontSize: 13, textAlign: 'center', paddingHorizontal: 24 },
   hintText:        { color: MUTED, fontSize: 11, marginTop: 5 },
+
+  // ── Mode toggle ───────────────────────────────────────────────────────────
+  modeToggle: {
+    flexDirection:  'row',
+    borderWidth:    1,
+    borderColor:    BORDER,
+    marginBottom:   14,
+    overflow:       'hidden',
+  },
+  modeBtn:       { flex: 1, paddingVertical: 8, alignItems: 'center' },
+  modeBtnActive: { backgroundColor: GOLD },
+  modeBtnLive:   { backgroundColor: RED },
+  modeTxt:       { color: MUTED, fontSize: 10, fontWeight: '700', letterSpacing: 1.5 },
+  modeTxtActive: { color: BG },
+  modeTxtLive:   { color: '#fff' },
+
+  // ── Live saved state ──────────────────────────────────────────────────────
+  savedState:  { flex: 1, alignItems: 'center', paddingTop: 32 },
+  savedSymbol: { color: GOLD, fontSize: 32, marginBottom: 16 },
+  savedTitle:  { color: CREAM, fontSize: 22, fontWeight: '700', marginBottom: 10 },
+  savedSub:    { color: MUTED, fontSize: 13, textAlign: 'center', lineHeight: 20, marginBottom: 32, paddingHorizontal: 16 },
+  uploadBtn:   { backgroundColor: GOLD, paddingVertical: 14, paddingHorizontal: 32, marginBottom: 16 },
+  uploadBtnTxt:{ color: BG, fontSize: 11, fontWeight: '700', letterSpacing: 2.5 },
+  discardTxt:  { color: MUTED, fontSize: 12 },
 
   // ── Record button ─────────────────────────────────────────────────────────
   recordBtn: {
