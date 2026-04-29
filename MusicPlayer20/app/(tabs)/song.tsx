@@ -27,7 +27,8 @@ import {
   type Chord,
   type Line,
 } from '@/components/LineView';
-import { ChordDiagramModal } from '@/components/ChordDiagram';
+import { ChordDiagramModal, ChordPreview } from '@/components/ChordDiagram';
+import { getAllChordNames } from '@/lib/chordDiagrams';
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
 
@@ -540,35 +541,69 @@ export default function SongScreen() {
       {/* ── Chord edit modal ── */}
       <Modal transparent visible={!!modal} animationType="fade" onRequestClose={() => setModal(null)}>
         <TouchableOpacity style={mo.overlay} activeOpacity={1} onPress={() => setModal(null)}>
-          <View style={mo.box}>
-            <Text style={mo.heading}>{modal?.ci !== null ? 'EDIT CHORD' : 'ADD CHORD'}</Text>
-            <Text style={mo.posHint}>position {modal?.position ?? 0}</Text>
-            <TextInput
-              style={mo.input}
-              value={modal?.value ?? ''}
-              onChangeText={v => setModal(m => m ? { ...m, value: v } : null)}
-              autoCapitalize="none"
-              autoCorrect={false}
-              autoFocus
-              selectTextOnFocus
-              placeholderTextColor={MUTED}
-              placeholder="e.g. Am7"
-            />
-            <View style={mo.btnRow}>
-              {modal?.ci !== null && (
-                <TouchableOpacity style={mo.deleteBtn} onPress={deleteChordModal}>
-                  <Text style={mo.deleteTxt}>DELETE</Text>
+          <TouchableOpacity activeOpacity={1} onPress={() => {}}>
+            <View style={mo.box}>
+              <Text style={mo.heading}>{modal?.ci !== null ? 'EDIT CHORD' : 'ADD CHORD'}</Text>
+              <Text style={mo.posHint}>position {modal?.position ?? 0}</Text>
+              <TextInput
+                style={mo.input}
+                value={modal?.value ?? ''}
+                onChangeText={v => setModal(m => m ? { ...m, value: v } : null)}
+                autoCapitalize="none"
+                autoCorrect={false}
+                autoFocus
+                selectTextOnFocus
+                placeholderTextColor={MUTED}
+                placeholder="e.g. Am7"
+              />
+
+              {/* Suggestion pills */}
+              {(modal?.value?.trim().length ?? 0) > 0 && (() => {
+                const q = modal!.value.trim().toLowerCase();
+                const hits = getAllChordNames()
+                  .filter(n => n.toLowerCase().startsWith(q))
+                  .slice(0, 14);
+                if (hits.length === 0) return null;
+                return (
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    style={mo.pillScroll}
+                    keyboardShouldPersistTaps="always"
+                  >
+                    {hits.map(n => (
+                      <TouchableOpacity
+                        key={n}
+                        style={mo.suggPill}
+                        onPress={() => setModal(m => m ? { ...m, value: n } : null)}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={mo.suggTxt}>{n}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </ScrollView>
+                );
+              })()}
+
+              {/* Live chord preview */}
+              <ChordPreview chordName={modal?.value ?? ''} />
+
+              <View style={mo.btnRow}>
+                {modal?.ci !== null && (
+                  <TouchableOpacity style={mo.deleteBtn} onPress={deleteChordModal}>
+                    <Text style={mo.deleteTxt}>DELETE</Text>
+                  </TouchableOpacity>
+                )}
+                <TouchableOpacity
+                  style={[mo.applyBtn, modal?.ci === null && { flex: 1 }]}
+                  onPress={applyChordModal}
+                  disabled={!modal?.value?.trim()}
+                >
+                  <Text style={mo.applyTxt}>APPLY</Text>
                 </TouchableOpacity>
-              )}
-              <TouchableOpacity
-                style={[mo.applyBtn, modal?.ci === null && { flex: 1 }]}
-                onPress={applyChordModal}
-                disabled={!modal?.value?.trim()}
-              >
-                <Text style={mo.applyTxt}>APPLY</Text>
-              </TouchableOpacity>
+              </View>
             </View>
-          </View>
+          </TouchableOpacity>
         </TouchableOpacity>
       </Modal>
 
@@ -770,16 +805,19 @@ export default function SongScreen() {
 // ─── Modal styles ─────────────────────────────────────────────────────────────
 
 const mo = StyleSheet.create({
-  overlay:   { flex: 1, backgroundColor: 'rgba(0,0,0,0.78)', justifyContent: 'center', alignItems: 'center' },
-  box:       { backgroundColor: '#131007', borderWidth: 1, borderColor: BORDER, padding: 24, width: 270 },
-  heading:   { color: GOLD_DIM, fontSize: 9, letterSpacing: 3, marginBottom: 4 },
-  posHint:   { color: MUTED, fontSize: 10, marginBottom: 14 },
-  input:     { color: GOLD, fontFamily: MONO, fontSize: 22, fontWeight: '700', borderBottomWidth: 1, borderBottomColor: GOLD_DIM, paddingBottom: 8, marginBottom: 22, textAlign: 'center', letterSpacing: 1 },
-  btnRow:    { flexDirection: 'row', gap: 10 },
-  deleteBtn: { flex: 1, borderWidth: 1, borderColor: RED, paddingVertical: 11, alignItems: 'center' },
-  deleteTxt: { color: RED, fontSize: 11, fontWeight: '700', letterSpacing: 1.5 },
-  applyBtn:  { flex: 1, backgroundColor: GOLD, paddingVertical: 11, alignItems: 'center' },
-  applyTxt:  { color: BG, fontSize: 11, fontWeight: '700', letterSpacing: 1.5 },
+  overlay:    { flex: 1, backgroundColor: 'rgba(0,0,0,0.78)', justifyContent: 'center', alignItems: 'center' },
+  box:        { backgroundColor: '#131007', borderWidth: 1, borderColor: BORDER, padding: 24, width: 270 },
+  heading:    { color: GOLD_DIM, fontSize: 9, letterSpacing: 3, marginBottom: 4 },
+  posHint:    { color: MUTED, fontSize: 10, marginBottom: 14 },
+  input:      { color: GOLD, fontFamily: MONO, fontSize: 22, fontWeight: '700', borderBottomWidth: 1, borderBottomColor: GOLD_DIM, paddingBottom: 8, marginBottom: 12, textAlign: 'center', letterSpacing: 1 },
+  pillScroll: { marginBottom: 8 },
+  suggPill:   { backgroundColor: '#1e1a0e', borderWidth: 1, borderColor: GOLD_DIM, paddingHorizontal: 10, paddingVertical: 5, marginRight: 6, borderRadius: 3 },
+  suggTxt:    { color: GOLD, fontFamily: MONO, fontSize: 12, fontWeight: '700' },
+  btnRow:     { flexDirection: 'row', gap: 10, marginTop: 4 },
+  deleteBtn:  { flex: 1, borderWidth: 1, borderColor: RED, paddingVertical: 11, alignItems: 'center' },
+  deleteTxt:  { color: RED, fontSize: 11, fontWeight: '700', letterSpacing: 1.5 },
+  applyBtn:   { flex: 1, backgroundColor: GOLD, paddingVertical: 11, alignItems: 'center' },
+  applyTxt:   { color: BG, fontSize: 11, fontWeight: '700', letterSpacing: 1.5 },
 });
 
 // ─── Screen styles ────────────────────────────────────────────────────────────

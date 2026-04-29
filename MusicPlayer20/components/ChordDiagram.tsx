@@ -132,6 +132,28 @@ const dg = StyleSheet.create({
   fretNum:     { position: 'absolute', color: MUTED, fontSize: 10 },
 });
 
+// ─── Inline chord preview (no modal) ─────────────────────────────────────────
+
+export function ChordPreview({ chordName }: { chordName: string }) {
+  if (!chordName?.trim()) return null;
+  const shape = lookupChord(chordName);
+  if (!shape) return (
+    <View style={cp.wrap}>
+      <Text style={cp.notFoundTxt}>♩  Not in chord library yet</Text>
+    </View>
+  );
+  return (
+    <View style={cp.wrap}>
+      <Fretboard shape={shape} />
+    </View>
+  );
+}
+
+const cp = StyleSheet.create({
+  wrap:        { alignItems: 'center', paddingVertical: 12 },
+  notFoundTxt: { color: MUTED, fontSize: 11, letterSpacing: 0.5, fontStyle: 'italic' },
+});
+
 // ─── Chord diagram modal ──────────────────────────────────────────────────────
 
 export function ChordDiagramModal({
