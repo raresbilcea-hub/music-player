@@ -1,17 +1,33 @@
-import { StyleSheet, Text, View, TextInput, TouchableOpacity, FlatList, ActivityIndicator, Image } from 'react-native';
-import { useState } from 'react';
+import { StyleSheet, Text, View, TextInput, TouchableOpacity, FlatList, ActivityIndicator, Image, ScrollView } from 'react-native';
+import { useState, useCallback } from 'react';
 import { useRouter } from 'expo-router';
-import { addToHistory } from '@/lib/songHistory';
+import { useFocusEffect } from 'expo-router';
+import { addToHistory, getHistory, type HistorySong } from '@/lib/songHistory';
 import { shouldShowGate, consumeFreeAction } from '@/lib/freeGate';
 import { FreeGateModal } from '@/components/FreeGateModal';
 
+type SearchSong = {
+  title:    string;
+  artist:   string;
+  album?:   string;
+  year?:    string;
+  genre?:   string;
+  artwork?: string;
+  duration?: string;
+};
+
 export default function HomeScreen() {
   const [query, setQuery] = useState('');
-  const [songs, setSongs] = useState([]);
+  const [songs, setSongs] = useState<SearchSong[]>([]);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState('');
   const [gateVisible, setGateVisible] = useState(false);
+  const [recentSongs, setRecentSongs] = useState<HistorySong[]>([]);
   const router = useRouter();
+
+  useFocusEffect(useCallback(() => {
+    getHistory().then(h => setRecentSongs(h.slice(0, 5)));
+  }, []));
 
   async function searchSongs() {
     if (!query) return;
@@ -35,7 +51,7 @@ export default function HomeScreen() {
     setLoading(false);
   }
 
-  async function openSong(song) {
+  async function openSong(song: SearchSong | HistorySong) {
     await addToHistory({
       title:   song.title,
       artist:  song.artist,
@@ -53,14 +69,14 @@ export default function HomeScreen() {
         album:    song.album    ?? '',
         year:     song.year     ?? '',
         genre:    song.genre    ?? '',
-        duration: song.duration ?? '',
+        duration: ('duration' in song ? song.duration : undefined) ?? '',
         artwork:  song.artwork  ?? '',
       },
     });
   }
 
-  return (
-    <View style={styles.container}>
+  const listHeader = (
+    <View style={styles.header}>
       <FreeGateModal visible={gateVisible} />
 
       {/* ── Hero ── */}
@@ -89,6 +105,31 @@ export default function HomeScreen() {
         </View>
       </View>
 
+      {recentSongs.length > 0 && (
+        <View style={styles.recentSection}>
+          <Text style={styles.recentLabel}>RECENTLY VIEWED</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.recentScroll}>
+            {recentSongs.map((song, i) => (
+              <TouchableOpacity
+                key={i}
+                style={styles.recentCard}
+                onPress={() => openSong(song)}
+                activeOpacity={0.8}
+              >
+                {song.artwork ? (
+                  <Image source={{ uri: song.artwork }} style={styles.recentArtwork} />
+                ) : (
+                  <View style={[styles.recentArtwork, styles.recentArtworkPlaceholder]} />
+                )}
+                <Text style={styles.recentTitle} numberOfLines={1}>{song.title}</Text>
+                <Text style={styles.recentArtist} numberOfLines={1}>{song.artist}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+
+      {/* ── Search ── */}
       <View style={styles.searchRow}>
         <TextInput
           style={styles.input}
@@ -105,27 +146,33 @@ export default function HomeScreen() {
 
       {status ? <Text style={styles.status}>— {status}</Text> : null}
       {loading ? <ActivityIndicator color="#c9a84c" style={{ marginBottom: 16 }} /> : null}
-
-      <FlatList
-        data={songs}
-        keyExtractor={(item, index) => index.toString()}
-        renderItem={({ item, index }) => (
-          <TouchableOpacity style={styles.songCard} onPress={() => openSong(item)}>
-            <Text style={styles.songNum}>{String(index + 1).padStart(2, '0')}</Text>
-            {item.artwork ? (
-              <Image source={{ uri: item.artwork }} style={styles.artwork} />
-            ) : (
-              <View style={styles.artworkPlaceholder} />
-            )}
-            <View style={styles.songInfo}>
-              <Text style={styles.songTitle}>{item.title}</Text>
-              <Text style={styles.songMeta}>{item.artist} · {item.album}</Text>
-            </View>
-            <Text style={styles.songYear}>{item.year}</Text>
-          </TouchableOpacity>
-        )}
-      />
     </View>
+  );
+
+  return (
+    <FlatList
+      style={styles.container}
+      data={songs}
+      keyExtractor={(item, index) => index.toString()}
+      ListHeaderComponent={listHeader}
+      renderItem={({ item, index }) => (
+        <TouchableOpacity style={styles.songCard} onPress={() => openSong(item)}>
+          <Text style={styles.songNum}>{String(index + 1).padStart(2, '0')}</Text>
+          {item.artwork ? (
+            <Image source={{ uri: item.artwork }} style={styles.artwork} />
+          ) : (
+            <View style={styles.artworkPlaceholder} />
+          )}
+          <View style={styles.songInfo}>
+            <Text style={styles.songTitle}>{item.title}</Text>
+            <Text style={styles.songMeta}>{item.artist} · {item.album}</Text>
+          </View>
+          <Text style={styles.songYear}>{item.year}</Text>
+        </TouchableOpacity>
+      )}
+      contentContainerStyle={styles.listContent}
+      keyboardShouldPersistTaps="handled"
+    />
   );
 }
 
@@ -133,8 +180,14 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#0e0c09',
-    padding: 24,
+  },
+  listContent: {
+    paddingHorizontal: 24,
     paddingTop: 24,
+    paddingBottom: 32,
+  },
+  header: {
+    // no extra styles needed; padding comes from listContent
   },
   heroName: {
     color: '#c9a84c',
@@ -249,5 +302,43 @@ const styles = StyleSheet.create({
   songYear: {
     color: '#8a6f32',
     fontSize: 11,
+  },
+  recentSection: {
+    marginBottom: 28,
+  },
+  recentLabel: {
+    color: '#6b6254',
+    fontSize: 10,
+    letterSpacing: 2,
+    fontWeight: '700',
+    marginBottom: 12,
+  },
+  recentScroll: {
+    gap: 10,
+  },
+  recentCard: {
+    width: 88,
+    backgroundColor: '#16130e',
+    borderWidth: 1,
+    borderColor: '#2a2318',
+    padding: 8,
+  },
+  recentArtwork: {
+    width: 72,
+    height: 72,
+    marginBottom: 8,
+  },
+  recentArtworkPlaceholder: {
+    backgroundColor: '#2a2318',
+  },
+  recentTitle: {
+    color: '#e8dfc8',
+    fontSize: 11,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  recentArtist: {
+    color: '#6b6254',
+    fontSize: 10,
   },
 });

@@ -75,18 +75,119 @@ async function lookupSpotifyKey(title, artist) {
   return { spotifyKey, spotifyTempo };
 }
 
-async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spotifyTempo) {
-  var systemPrompt = "You are a world-class musician and transcriptionist. Generate chord charts as a JSON object with EXACTLY these top-level fields: title (string), artist (string), musicalKey (string e.g. \"G major\"), tempo (number BPM), capo (number, 0 if none), sections (array). Each section has: label (string e.g. \"Verse 1\", \"Chorus\", \"Bridge\") and lines (array). Each line has: lyrics (string) and chords (array of {chord: string, position: number} where position is the 0-based character index in the lyrics string where the chord falls). Include ALL sections of the song — every verse, chorus, pre-chorus, bridge, and outro. Do not truncate. Use only exact chords from the original recording. No substitutions. Respond ONLY with a single valid JSON object.";
+// ─── Lyrics fetching (lrclib.net → lyrics.ovh) ───────────────────────────────
+
+async function fetchLyricsFromLRCLib(title, artist) {
+  try {
+    var params = "artist_name=" + encodeURIComponent(artist) + "&track_name=" + encodeURIComponent(title);
+    var res = await axios.get("https://lrclib.net/api/get?" + params, { timeout: 6000 });
+    if (res.data && res.data.plainLyrics && res.data.plainLyrics.trim().length > 40) {
+      return res.data.plainLyrics.trim();
+    }
+    return null;
+  } catch(e) { console.log("lrclib error:", e.message); return null; }
+}
+
+async function fetchLyricsFromOVH(title, artist) {
+  try {
+    var url = "https://api.lyrics.ovh/v1/" + encodeURIComponent(artist) + "/" + encodeURIComponent(title);
+    var res = await axios.get(url, { timeout: 6000 });
+    if (res.data && res.data.lyrics && res.data.lyrics.trim().length > 40) {
+      return res.data.lyrics.trim();
+    }
+    return null;
+  } catch(e) { console.log("lyrics.ovh error:", e.message); return null; }
+}
+
+async function fetchRealLyrics(title, artist) {
+  console.log("Lyrics: trying lrclib.net...");
+  var lyrics = await fetchLyricsFromLRCLib(title, artist);
+  if (lyrics) { console.log("Lyrics: found on lrclib (" + lyrics.length + " chars)"); return lyrics; }
+  console.log("Lyrics: trying lyrics.ovh...");
+  lyrics = await fetchLyricsFromOVH(title, artist);
+  if (lyrics) { console.log("Lyrics: found on lyrics.ovh (" + lyrics.length + " chars)"); return lyrics; }
+  console.log("Lyrics: not found on any source, AI will generate");
+  return null;
+}
+
+// ─── Chart generation ─────────────────────────────────────────────────────────
+
+async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spotifyTempo, realLyrics) {
   var keyInfo = spotifyKey
-    ? " The song is in " + spotifyKey + " (verified via Spotify)."
-    : " Before generating chords, identify the exact musical key of this song from your training data and use it throughout — set the musicalKey field accordingly.";
-  var tempoInfo = spotifyTempo ? " The tempo is " + spotifyTempo + " BPM (verified via Spotify)." : "";
-  var userPrompt = "Generate a complete, accurate chord chart for \"" + title + "\" by " + artist + " (released " + (releaseDate || "unknown") + ")." + keyInfo + tempoInfo + " Include every section with real lyrics and accurate chords. Do not skip or summarize any section.";
-  console.log("OpenAI: key source:", spotifyKey ? "Spotify" : "training data");
+    ? "The song is in " + spotifyKey + " (confirmed via Spotify audio analysis)."
+    : "Identify the exact musical key of this song from your training data.";
+  var tempoInfo = spotifyTempo ? " Tempo: " + spotifyTempo + " BPM (confirmed via Spotify)." : "";
+
+  var systemPrompt, userPrompt;
+
+  if (realLyrics) {
+    // ── Mode A: real lyrics provided — AI only needs to place chords ──────────
+    console.log("OpenAI: using REAL lyrics (" + realLyrics.length + " chars) — chord placement mode");
+    systemPrompt = [
+      "You are a world-class guitarist and music transcriptionist.",
+      "",
+      "You will receive the VERIFIED real lyrics of a song. Your only job is to place accurate chord symbols on those lyrics.",
+      "",
+      "OUTPUT FORMAT — JSON object with these exact fields:",
+      "  title (string), artist (string), musicalKey (string, e.g. \"G major\"), tempo (number BPM), capo (number, 0 if none),",
+      "  sections (array of { label: string, lines: array of { lyrics: string, chords: array of { chord: string, position: number } } })",
+      "",
+      "RULES:",
+      "  1. Copy the provided lyrics EXACTLY — do not alter, rephrase, or fix a single word.",
+      "  2. Split into real song sections based on the lyric structure or any [Section] markers in the text.",
+      "  3. Place chords at the correct character positions — position = 0-based index in the lyrics string.",
+      "  4. Use the ACTUAL chords from the original recording. Recall them from your training data.",
+      "  5. Every line with lyrics must have at least one chord entry.",
+      "  6. Respond ONLY with a single valid JSON object — no markdown, no explanation.",
+    ].join("\n");
+
+    userPrompt = [
+      "Song: \"" + title + "\" by " + artist + (releaseDate ? " (" + releaseDate + ")" : "") + ".",
+      keyInfo + tempoInfo,
+      "",
+      "REAL LYRICS (copy these exactly — do not change any word):",
+      "---",
+      realLyrics,
+      "---",
+      "",
+      "Now generate the complete chord chart JSON, placing the correct chords from the original recording onto these lyrics.",
+    ].join("\n");
+
+  } else {
+    // ── Mode B: no real lyrics — chain-of-thought recall ──────────────────────
+    console.log("OpenAI: no real lyrics found — chain-of-thought recall mode");
+    systemPrompt = [
+      "You are a world-class guitarist, lyricist, and music transcriptionist with encyclopedic knowledge of recorded music.",
+      "",
+      "OUTPUT FORMAT — JSON object with these exact fields:",
+      "  title (string), artist (string), musicalKey (string, e.g. \"G major\"), tempo (number BPM), capo (number, 0 if none),",
+      "  sections (array of { label: string, lines: array of { lyrics: string, chords: array of { chord: string, position: number } } })",
+      "",
+      "RULES:",
+      "  1. Include EVERY section — every verse, pre-chorus, chorus, post-chorus, bridge, interlude, and outro.",
+      "  2. Lyrics must be EXACT — word-for-word as sung on the original recording. No paraphrasing.",
+      "  3. Chords must be ACCURATE — recall the actual chords from the original recording, not generic substitutes.",
+      "  4. chord position = 0-based character index in the lyrics string where the chord change occurs.",
+      "  5. Every line must have at least one chord entry.",
+      "  6. Respond ONLY with a single valid JSON object — no markdown, no explanation.",
+      "",
+      "BEFORE generating, mentally work through these steps:",
+      "  - What is the exact song structure? (list all sections in order)",
+      "  - What are the exact opening words of each section?",
+      "  - What chords play under each section? (recall from training data)",
+      "  - Does the chord progression change between Verse 1 and Verse 2?",
+    ].join("\n");
+
+    userPrompt = [
+      "Generate a complete, accurate chord chart for \"" + title + "\" by " + artist + (releaseDate ? " (released " + releaseDate + ")" : "") + ".",
+      keyInfo + tempoInfo,
+      "Include every section with exact original lyrics and accurate chords.",
+    ].join("\n");
+  }
 
   var completion = await openai.chat.completions.create({
     model: "gpt-4o",
-    max_tokens: 4096,
+    max_tokens: 8192,
     temperature: 0.1,
     response_format: { type: "json_object" },
     messages: [
@@ -153,7 +254,7 @@ app.get("/chords", async function(req, res) {
   }
 });
 
-// POST /chords { title, artist } — generate + save (Spotify key → OpenAI → Supabase)
+// POST /chords { title, artist } — generate + save (lyrics → Spotify key → OpenAI → Supabase)
 app.post("/chords", async function(req, res) {
   var title = req.body.title, artist = req.body.artist;
   if (!title || !artist) return res.status(400).json({ error: "title and artist required" });
@@ -167,8 +268,14 @@ app.post("/chords", async function(req, res) {
       return res.json({ found: true, fromDatabase: true, chart: existing });
     }
 
-    var { spotifyKey, spotifyTempo } = await lookupSpotifyKey(title, artist);
-    var chart = await generateChartWithAI(title, artist, null, spotifyKey, spotifyTempo);
+    // Fetch real lyrics and Spotify key in parallel
+    var [lyricsResult, spotifyResult] = await Promise.all([
+      fetchRealLyrics(title, artist),
+      lookupSpotifyKey(title, artist)
+    ]);
+    var { spotifyKey, spotifyTempo } = spotifyResult;
+
+    var chart = await generateChartWithAI(title, artist, null, spotifyKey, spotifyTempo, lyricsResult);
     await saveChartToDB(chart, title, artist);
     res.json({ found: true, fromDatabase: false, chart });
   } catch(e) {
@@ -200,15 +307,7 @@ app.post("/identify", async function(req, res) {
       }
     } catch(e) { console.error("AudD error:", e.message); }
 
-    console.log("Step 2: Looking up Spotify audio features...");
-    var spotifyKey = null, spotifyTempo = null;
-    if (songInfo) {
-      var spotifyResult = await lookupSpotifyKey(songInfo.title, songInfo.artist);
-      spotifyKey = spotifyResult.spotifyKey;
-      spotifyTempo = spotifyResult.spotifyTempo;
-    }
-
-    console.log("Step 3: Checking Supabase chord database...");
+    console.log("Step 2: Checking Supabase chord database...");
     if (songInfo) {
       try {
         var cached = await fetchChartFromDB(songInfo.title, songInfo.artist);
@@ -219,13 +318,25 @@ app.post("/identify", async function(req, res) {
       } catch(e) { console.log("DB lookup error:", e.message); }
     }
 
+    console.log("Step 3: Fetching real lyrics + Spotify key in parallel...");
+    var spotifyKey = null, spotifyTempo = null, realLyrics = null;
+    if (songInfo) {
+      var [lyricsResult, spotifyResult] = await Promise.all([
+        fetchRealLyrics(songInfo.title, songInfo.artist),
+        lookupSpotifyKey(songInfo.title, songInfo.artist)
+      ]);
+      realLyrics = lyricsResult;
+      spotifyKey = spotifyResult.spotifyKey;
+      spotifyTempo = spotifyResult.spotifyTempo;
+    }
+
     console.log("Step 4: Generating chart with OpenAI gpt-4o...");
     var chart;
     if (songInfo) {
-      chart = await generateChartWithAI(songInfo.title, songInfo.artist, songInfo.release_date, spotifyKey, spotifyTempo);
+      chart = await generateChartWithAI(songInfo.title, songInfo.artist, songInfo.release_date, spotifyKey, spotifyTempo, realLyrics);
       await saveChartToDB(chart, songInfo.title, songInfo.artist);
     } else {
-      chart = await generateChartWithAI("Unknown Song", "Unknown Artist", null, null, null);
+      chart = await generateChartWithAI("Unknown Song", "Unknown Artist", null, null, null, null);
     }
 
     res.json({ identified: !!songInfo, fromDatabase: false, songInfo, chart });

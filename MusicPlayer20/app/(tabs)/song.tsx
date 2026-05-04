@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { useState, useEffect, useCallback } from 'react';
-import { getHistory, clearHistory, type HistorySong } from '@/lib/songHistory';
+import { getHistory, clearHistory, addToVerified, type HistorySong } from '@/lib/songHistory';
 import { useAuth } from '@/context/auth';
 import {
   LineView,
@@ -472,6 +472,8 @@ export default function SongScreen() {
       if (!res.ok || data.error) throw new Error(data.error ?? `HTTP ${res.status}`);
 
       setChart({ ...draft, verified: true });
+      const artworkUrl = params.artwork ? String(params.artwork) : undefined;
+      addToVerified({ title, artist, artwork: artworkUrl });
       setEditing(false); setDraft(null); setModal(null);
     } catch (e: any) {
       setSaveError(e.message);

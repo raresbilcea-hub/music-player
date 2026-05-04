@@ -113,3 +113,33 @@ export async function clearHistory(): Promise<void> {
   const userId = await cloudUserId();
   if (userId) cloudClear(userId); // fire-and-forget
 }
+
+// ── Verified songs (local-only, tracks what this user corrected) ──────────────
+
+const VERIFIED_KEY = '@mp_verified_songs';
+
+export type VerifiedSong = {
+  title:    string;
+  artist:   string;
+  artwork?: string;
+  verifiedAt: number;
+};
+
+export async function addToVerified(song: Omit<VerifiedSong, 'verifiedAt'>): Promise<void> {
+  try {
+    const raw  = await AsyncStorage.getItem(VERIFIED_KEY);
+    const prev: VerifiedSong[] = raw ? JSON.parse(raw) : [];
+    const deduped = prev.filter(
+      s => !(s.title.toLowerCase() === song.title.toLowerCase() &&
+             s.artist.toLowerCase() === song.artist.toLowerCase())
+    );
+    await AsyncStorage.setItem(VERIFIED_KEY, JSON.stringify([{ ...song, verifiedAt: Date.now() }, ...deduped]));
+  } catch {}
+}
+
+export async function getVerified(): Promise<VerifiedSong[]> {
+  try {
+    const raw = await AsyncStorage.getItem(VERIFIED_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}

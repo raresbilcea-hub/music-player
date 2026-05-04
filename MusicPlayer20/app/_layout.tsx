@@ -29,6 +29,17 @@ function RootLayoutNav() {
         <Stack.Screen name="login" options={{ headerShown: false }} />
         <Stack.Screen name="register" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+        <Stack.Screen
+          name="profile"
+          options={{
+            title: 'Profile',
+            presentation: 'modal',
+            headerStyle: { backgroundColor: '#0e0c09' },
+            headerTintColor: '#c9a84c',
+            headerTitleStyle: { color: '#c9a84c', fontSize: 13, fontWeight: '600' },
+            headerShadowVisible: false,
+          }}
+        />
       </Stack>
       <StatusBar style="light" />
     </>

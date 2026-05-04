@@ -19,9 +19,11 @@ function AuthHeaderButton() {
   if (user) {
     return (
       <View style={hb.row}>
-        <Text style={hb.email} numberOfLines={1}>
-          {user.email?.split('@')[0]}
-        </Text>
+        <TouchableOpacity onPress={() => router.push('/profile')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <Text style={hb.email} numberOfLines={1}>
+            {user.email?.split('@')[0]}
+          </Text>
+        </TouchableOpacity>
         <TouchableOpacity onPress={() => signOut()} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
           <Text style={hb.signOut}>SIGN OUT</Text>
         </TouchableOpacity>
