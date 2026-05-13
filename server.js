@@ -1,605 +1,145 @@
-require("dotenv").config();
-const express = require("express");
-const axios = require("axios");
-const cors = require("cors");
-const FormData = require("form-data");
-const OpenAI = require("openai");
-const { createClient } = require("@supabase/supabase-js");
+require('dotenv').config();
+const express = require('express');
+const axios = require('axios');
+const cors = require('cors');
+const FormData = require('form-data');
+const OpenAI = require('openai');
 
 const app = express();
 const port = 3000;
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 app.use(cors());
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: '50mb' }));
 
-// ─── Shared helpers ───────────────────────────────────────────────────────────
+app.get('/', function(req, res) { res.send('Music Player 2.0 server is running!'); });
 
-async function fetchChartFromDB(title, artist) {
-  var { data: rows } = await supabase
-    .from("chord_charts")
-    .select("*")
-    .ilike("title", title)
-    .ilike("artist", artist)
-    .limit(1);
-  if (!rows || rows.length === 0) return null;
-  var r = rows[0];
-  await supabase.from("chord_charts").update({ play_count: (r.play_count || 0) + 1 }).eq("id", r.id);
-  return { title: r.title, artist: r.artist, musicalKey: r.musical_key, tempo: r.tempo, capo: r.capo, sections: r.sections, verified: r.verified };
-}
-
-async function lookupSpotifyKey(title, artist) {
-  var spotifyKey = null, spotifyTempo = null;
-  try {
-    console.log("Spotify: requesting token...");
-    var tokenResponse = await axios.post(
-      "https://accounts.spotify.com/api/token",
-      "grant_type=client_credentials",
-      { headers: { "Content-Type": "application/x-www-form-urlencoded", "Authorization": "Basic " + Buffer.from(process.env.SPOTIFY_CLIENT_ID + ":" + process.env.SPOTIFY_CLIENT_SECRET).toString("base64") } }
-    );
-    var spotifyToken = tokenResponse.data.access_token;
-
-    var searchResponse = await axios.get("https://api.spotify.com/v1/search", {
-      headers: { "Authorization": "Bearer " + spotifyToken },
-      params: { q: title + " " + artist, type: "track", limit: 1 }
-    });
-    var tracks = searchResponse.data.tracks.items;
-    console.log("Spotify: search hits:", tracks.length);
-
-    if (tracks.length > 0) {
-      var trackId = tracks[0].id;
-      console.log("Spotify: matched track:", tracks[0].name, "id:", trackId);
-      var analysisResponse = await axios.get("https://api.spotify.com/v1/audio-analysis/" + trackId, {
-        headers: { "Authorization": "Bearer " + spotifyToken },
-        validateStatus: null
-      });
-      console.log("Spotify: audio-analysis status:", analysisResponse.status);
-      if (analysisResponse.status === 200 && analysisResponse.data && analysisResponse.data.track) {
-        var at = analysisResponse.data.track;
-        if (at.key !== undefined && at.key !== -1) {
-          var KEY_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-          spotifyKey = KEY_NAMES[at.key] + (at.mode === 1 ? " major" : " minor");
-          spotifyTempo = Math.round(at.tempo);
-          console.log("Spotify: key:", spotifyKey, "tempo:", spotifyTempo);
-        } else {
-          console.log("Spotify: key undetected (key=-1)");
-        }
-      } else {
-        console.log("Spotify: audio-analysis unavailable (status " + analysisResponse.status + ")");
-      }
-    }
-  } catch(e) {
-    console.error("Spotify error:", e.message);
-  }
-  return { spotifyKey, spotifyTempo };
-}
-
-// ─── Title / artist normalization ────────────────────────────────────────────
-// Strips parenthetical decorations and common suffixes that prevent lrclib's
-// exact match from finding the canonical recording.
-//   "Bohemian Rhapsody (Remastered 2011)"     -> "Bohemian Rhapsody"
-//   "One Love / People Get Ready - Live"      -> "One Love / People Get Ready"
-//   "Bob Marley & The Wailers"                -> "Bob Marley"
-//   "Drake feat. Future"                      -> "Drake"
-
-function normalizeForLookup(s) {
-  return String(s || "")
-    .replace(/\s*\([^)]*\)\s*/g, " ")                                              // "(Remastered 2015)"
-    .replace(/\s*\[[^\]]*\]\s*/g, " ")                                             // "[Live]"
-    .replace(/\s*-\s*(Remastered|Remaster|Live|Acoustic|Demo|Mono|Stereo|Single Version|Album Version|Radio Edit|Edit|Bonus Track)[^-]*$/i, "")
-    .replace(/\s*(feat\.?|featuring|ft\.?)\s+.+$/i, "")
-    .replace(/\s+&\s+The\s+\w+.*$/i, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-// ─── Lyrics fetching (lrclib /get → lrclib /search → lyrics.ovh) ────────────
-
-async function lrclibGet(title, artist) {
-  try {
-    var params = "artist_name=" + encodeURIComponent(artist) + "&track_name=" + encodeURIComponent(title);
-    var res = await axios.get("https://lrclib.net/api/get?" + params, { timeout: 6000 });
-    if (res.data && res.data.plainLyrics && res.data.plainLyrics.trim().length > 80) {
-      return res.data.plainLyrics.trim();
-    }
-  } catch(e) { /* 404 is normal */ }
-  return null;
-}
-
-async function lrclibSearch(title, artist) {
-  try {
-    var q = "q=" + encodeURIComponent(title + " " + artist);
-    var res = await axios.get("https://lrclib.net/api/search?" + q, { timeout: 6000 });
-    var hits = Array.isArray(res.data) ? res.data : [];
-    var nT = normalizeForLookup(title).toLowerCase();
-    var nA = normalizeForLookup(artist).toLowerCase().split(" ")[0]; // first artist word
-    // Prefer hits whose title + artist roughly match the request
-    for (var i = 0; i < hits.length; i++) {
-      var h = hits[i];
-      if (!h || !h.plainLyrics || h.plainLyrics.length < 80) continue;
-      var hT = String(h.trackName  || "").toLowerCase();
-      var hA = String(h.artistName || "").toLowerCase();
-      var titleOk  = hT.indexOf(nT) !== -1 || nT.indexOf(hT) !== -1;
-      var artistOk = nA && (hA.indexOf(nA) !== -1 || nA.indexOf(hA.split(" ")[0]) !== -1);
-      if (titleOk && artistOk) return h.plainLyrics.trim();
-    }
-    // No good match, fall back to top hit if it has substantial lyrics
-    if (hits[0] && hits[0].plainLyrics && hits[0].plainLyrics.trim().length > 200) {
-      return hits[0].plainLyrics.trim();
-    }
-  } catch(e) { console.log("lrclib /search error:", e.message); }
-  return null;
-}
-
-async function fetchLyricsFromOVH(title, artist) {
-  try {
-    var url = "https://api.lyrics.ovh/v1/" + encodeURIComponent(artist) + "/" + encodeURIComponent(title);
-    var res = await axios.get(url, { timeout: 6000 });
-    // 200-char floor — lyrics.ovh sometimes returns truncated junk
-    if (res.data && res.data.lyrics && res.data.lyrics.trim().length > 200) {
-      return res.data.lyrics.trim();
-    }
-  } catch(e) { /* 404 is normal */ }
-  return null;
-}
-
-async function fetchRealLyrics(rawTitle, rawArtist) {
-  var title  = normalizeForLookup(rawTitle);
-  var artist = normalizeForLookup(rawArtist);
-
-  console.log("Lyrics: lrclib /get normalized -> '" + title + "' / '" + artist + "'");
-  var l = await lrclibGet(title, artist);
-  if (l) { console.log("Lyrics: lrclib /get hit (" + l.length + " chars)"); return l; }
-
-  if (rawTitle !== title || rawArtist !== artist) {
-    console.log("Lyrics: lrclib /get raw -> '" + rawTitle + "' / '" + rawArtist + "'");
-    l = await lrclibGet(rawTitle, rawArtist);
-    if (l) { console.log("Lyrics: lrclib /get raw hit (" + l.length + " chars)"); return l; }
-  }
-
-  console.log("Lyrics: lrclib /search...");
-  l = await lrclibSearch(title, artist);
-  if (l) { console.log("Lyrics: lrclib /search hit (" + l.length + " chars)"); return l; }
-
-  console.log("Lyrics: lyrics.ovh...");
-  l = await fetchLyricsFromOVH(title, artist);
-  if (l) { console.log("Lyrics: lyrics.ovh hit (" + l.length + " chars)"); return l; }
-
-  console.log("Lyrics: not found — AI will recall from training data");
-  return null;
-}
-
-// ─── ChordPro parsing + chart validation ────────────────────────────────────
-// We ask the LLM to emit ChordPro inline format (e.g. "[G]Hello dar[Am]ling")
-// instead of computing character positions itself. The server then parses
-// the brackets and computes accurate positions — this is the main reliability
-// fix: it removes character counting from the LLM's job.
-
-var SECTION_RE = /^(intro|verse|pre[ -]?chorus|chorus|post[ -]?chorus|bridge|hook|interlude|instrumental|solo|outro|breakdown|refrain|tag|coda|ending|drop|build|riff)/i;
-
-function parseChordPro(text) {
-  var rawLines = String(text || "").split(/\r?\n/);
-  var sections = [];
-  var current  = null;
-
-  function ensureSection() {
-    if (!current) current = { label: "Verse", lines: [] };
-  }
-
-  function parseInline(rawLine) {
-    var lyrics = "";
-    var chords = [];
-    var i = 0;
-    while (i < rawLine.length) {
-      if (rawLine[i] === "[") {
-        var end = rawLine.indexOf("]", i);
-        if (end === -1) { lyrics += rawLine.substring(i); break; }
-        var chord = rawLine.substring(i + 1, end).trim();
-        if (chord) chords.push({ chord: chord, position: lyrics.length });
-        i = end + 1;
-      } else {
-        lyrics += rawLine[i];
-        i++;
-      }
-    }
-    ensureSection();
-    current.lines.push({ lyrics: lyrics.replace(/\s+$/, ""), chords: chords });
-  }
-
-  for (var li = 0; li < rawLines.length; li++) {
-    var line    = rawLines[li];
-    var trimmed = line.trim();
-
-    if (trimmed === "") {
-      // blank line = soft section boundary; commit current if it has content
-      if (current && current.lines.length > 0) { sections.push(current); current = null; }
-      continue;
-    }
-
-    // Section header forms: "[Verse 1]", "(Chorus)", "Verse 1:"
-    var m =
-      trimmed.match(/^\[([^\]]+)\]$/) ||
-      trimmed.match(/^\(([^)]+)\)$/) ||
-      trimmed.match(/^([A-Z][A-Za-z0-9 \-]{1,30}):$/);
-    if (m && SECTION_RE.test(m[1].trim())) {
-      if (current && current.lines.length > 0) sections.push(current);
-      current = { label: m[1].trim(), lines: [] };
-      continue;
-    }
-
-    parseInline(line);
-  }
-  if (current && current.lines.length > 0) sections.push(current);
-  return sections;
-}
-
-function validateAndRepairChart(chart) {
-  var out = {
-    title:      String(chart.title  || ""),
-    artist:     String(chart.artist || ""),
-    musicalKey: chart.musicalKey || null,
-    tempo:      chart.tempo      || null,
-    capo:       (chart.capo === 0 || chart.capo) ? chart.capo : 0,
-    sections:   [],
-  };
-  var rawSections = Array.isArray(chart.sections) ? chart.sections : [];
-  for (var i = 0; i < rawSections.length; i++) {
-    var s = rawSections[i] || {};
-    var lines = Array.isArray(s.lines) ? s.lines : [];
-    var cleanLines = [];
-    for (var j = 0; j < lines.length; j++) {
-      var ln = lines[j] || {};
-      var lyrics = String(ln.lyrics || "").replace(/\s+$/, "");
-      var chords = Array.isArray(ln.chords) ? ln.chords : [];
-      var cleanChords = [];
-      for (var k = 0; k < chords.length; k++) {
-        var c = chords[k] || {};
-        var name = String(c.chord || "").trim();
-        if (!name) continue;
-        var pos = Number(c.position);
-        if (!Number.isFinite(pos) || pos < 0) pos = 0;
-        var maxPos = Math.max(0, lyrics.length);
-        if (pos > maxPos) pos = maxPos;
-        cleanChords.push({ chord: name, position: pos });
-      }
-      cleanChords.sort(function(a, b) { return a.position - b.position; });
-      if (lyrics.length === 0 && cleanChords.length === 0) continue;
-      cleanLines.push({ lyrics: lyrics, chords: cleanChords });
-    }
-    if (cleanLines.length === 0) continue;
-    out.sections.push({ label: String(s.label || "Verse"), lines: cleanLines });
-  }
-  return out;
-}
-
-// ─── Chart generation ─────────────────────────────────────────────────────────
-
-async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spotifyTempo, realLyrics) {
-  var keyInfo = spotifyKey
-    ? "Confirmed musical key: " + spotifyKey + " (Spotify audio analysis)."
-    : "Identify the exact musical key from your training data.";
-  var tempoInfo = spotifyTempo ? " Tempo: " + spotifyTempo + " BPM (Spotify)." : "";
-
-  // Pre-compute the enharmonic preference — if Spotify says a flat key, lock
-  // chord names to flats; if sharp, lock to sharps. Avoids the "Db song with
-  // C#m chords" bug class.
-  var FLAT_KEYS  = ["F", "Bb", "Eb", "Ab", "Db", "Gb", "Cb"];
-  var SHARP_KEYS = ["G", "D", "A", "E", "B", "F#", "C#"];
-  var enharmonicHint = "";
-  if (spotifyKey) {
-    var rootMatch = spotifyKey.match(/^([A-G][#b]?)/);
-    var root = rootMatch ? rootMatch[1] : null;
-    var isMinor = /minor/i.test(spotifyKey);
-    // For minor keys, the enharmonic convention follows the relative major.
-    if (root) {
-      var prefersFlats = FLAT_KEYS.indexOf(root) !== -1 || (isMinor && /^(D|G|C|F|Bb|Eb)$/.test(root));
-      enharmonicHint = prefersFlats
-        ? "Use FLAT chord names throughout (Db, Eb, Ab, Bb, Gb, F, Cm, Fm, Bbm). Never write C# / D# / G# / A# in this song — use the flat equivalent (Db, Eb, Ab, Bb)."
-        : "Use SHARP chord names throughout (C#, D#, F#, G#, A#, F#m, C#m). Never write Db / Eb / Gb / Ab in this song — use the sharp equivalent.";
-    }
-  }
-
-  // Common output format spec for both modes — ChordPro inline.
-  // The model only inserts [Chord] tags; the server computes character
-  // positions afterwards. This eliminates the "off-by-one syllable" failure
-  // mode caused by asking an LLM to count characters.
-  var FORMAT_SPEC = [
-    "OUTPUT FORMAT — plain text, ChordPro inline. No JSON, no markdown fences, no commentary.",
-    "  - Each section starts with a header on its own line in square brackets:",
-    "      [Intro], [Verse 1], [Pre-Chorus], [Chorus], [Bridge], [Outro], etc.",
-    "  - Then the lyrics for that section, one line per line.",
-    "  - Place chord names in square brackets INLINE, immediately before the syllable they sound on.",
-    "  - No space between ']' and the next character.",
-    "  - Example:",
-    "      [Verse 1]",
-    "      [G]Hello dar[Am]ling, the [C]days drift [G]by",
-    "      [Em]Time keeps [C]turning, [G]you and [D]I",
-    "  - Standard chord names only: G, D, Em, A7, Cmaj7, F#m, Bb, D/F#. No tablature, no rhythm notation.",
-  ].join("\n");
-
-  var systemPrompt, userPrompt;
-
-  if (realLyrics) {
-    // ── Mode A: real lyrics in hand — model only places chords ────────────────
-    console.log("OpenAI: ChordPro placement mode (verified lyrics, " + realLyrics.length + " chars)");
-    systemPrompt = [
-      "You are a world-class guitarist and music transcriptionist.",
-      "",
-      "TASK",
-      "You will be given the verified lyrics of a song. Re-emit the song in ChordPro inline format with accurate chords from the original recording placed inline before the syllable they sound on.",
-      "",
-      FORMAT_SPEC,
-      "",
-      "RULES",
-      "  1. COPY THE LYRICS WORD-FOR-WORD. Do not change, omit, fix, or invent a single word.",
-      "  2. Use the ACTUAL chords from the original recording — recall them from your training data, do not substitute generic ones.",
-      "  3. Every line of lyrics must carry at least one chord.",
-      "  4. Group lines into the song's real sections: Intro, Verse, Pre-Chorus, Chorus, Bridge, Outro, etc. Use [Section] headers.",
-      "  5. If the verified lyrics already contain [Section] markers, preserve them.",
-      "  6. The first line of your response MUST be a section header in square brackets.",
-      "  7. KEY ENFORCEMENT — if a confirmed key is given, every chord MUST be diatonic to that key, or a clearly recognised borrowed-chord exception used in the original recording. Do NOT pick a chord whose root is foreign to the key.",
-      "  8. " + (enharmonicHint || "Pick one enharmonic convention (sharps OR flats) per song and stay consistent. Never mix C# and Db in the same chart."),
-      "  9. SIMPLICITY — if you are not certain the song uses many chord changes, prefer the simplest progression that fits the key. Many recordings use only 2-4 chords throughout; do not invent extra changes to seem comprehensive.",
-      " 10. If you do not actually know this specific song, output the simplest 2-3 chord progression in the confirmed key and apply it consistently — do not fabricate exotic chord changes.",
-    ].join("\n");
-
-    userPrompt = [
-      'Song: "' + title + '" by ' + artist + (releaseDate ? " (" + releaseDate + ")" : "") + ".",
-      keyInfo + tempoInfo,
-      "",
-      "VERIFIED LYRICS — copy these exactly, do not alter a single word:",
-      "---",
-      realLyrics,
-      "---",
-      "",
-      "Emit the full song in ChordPro inline format with the actual chords from the original recording.",
-    ].join("\n");
-
-  } else {
-    // ── Mode B: no verified lyrics — full recall ──────────────────────────────
-    console.log("OpenAI: ChordPro recall mode (no verified lyrics)");
-    systemPrompt = [
-      "You are a world-class guitarist, lyricist, and music transcriptionist with encyclopedic knowledge of recorded music.",
-      "",
-      "TASK",
-      "Recall the song from your training data and emit it in ChordPro inline format.",
-      "",
-      FORMAT_SPEC,
-      "",
-      "RULES",
-      "  1. Lyrics must be EXACT — word-for-word as sung on the original recording. No paraphrasing or invention.",
-      "  2. Chords must be ACCURATE — the actual chords from the original recording, not generic substitutes.",
-      "  3. Cover every section in order: Intro, Verse 1, Verse 2, Pre-Chorus, Chorus, Bridge, Outro, etc.",
-      "  4. Every line of lyrics must carry at least one chord.",
-      "  5. Do not invent placeholder text like 'la la la' or '[unintelligible]'.",
-      "  6. The first line of your response MUST be a section header in square brackets.",
-      "  7. KEY ENFORCEMENT — if a confirmed key is given, every chord MUST be diatonic to that key, or a clearly recognised borrowed-chord exception used in the original recording. Do NOT pick a chord whose root is foreign to the key.",
-      "  8. " + (enharmonicHint || "Pick one enharmonic convention (sharps OR flats) per song and stay consistent. Never mix C# and Db in the same chart."),
-      "  9. SIMPLICITY — many indie/folk/pop recordings use only 2-4 chords throughout. If you are not 100% certain of complex chord changes, output the simplest progression that fits the key and apply it consistently.",
-      " 10. If you do not actually know this specific song from your training data, do NOT fabricate exotic chord changes. Pick the most common 2-3 chord progression in the confirmed key and use it consistently.",
-      "",
-      "BEFORE writing, briefly think through:",
-      "  - What is the song's structure? (list sections in order)",
-      "  - What are the opening words of each section?",
-      "  - What chord progression underlies each section?",
-    ].join("\n");
-
-    userPrompt = [
-      'Recall and transcribe "' + title + '" by ' + artist + (releaseDate ? " (released " + releaseDate + ")" : "") + ".",
-      keyInfo + tempoInfo,
-      "Output the complete song in ChordPro inline format.",
-    ].join("\n");
-  }
-
-  var completion = await openai.chat.completions.create({
-    model: "gpt-4o",
-    max_tokens: 4096,
-    temperature: 0.1,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt }
-    ]
-  });
-
-  var raw = completion.choices[0].message.content || completion.choices[0].message.refusal || "";
-  console.log("OpenAI: finish_reason:", completion.choices[0].finish_reason, "length:", raw.length);
-  if (!raw) throw new Error("OpenAI returned empty response");
-
-  // Strip stray markdown fencing if the model wrapped its output
-  raw = raw.replace(/^```[A-Za-z0-9_-]*\s*/m, "").replace(/```\s*$/m, "").trim();
-
-  var sections = parseChordPro(raw);
-  if (sections.length === 0) {
-    console.error("ChordPro parse produced 0 sections — raw output:\n" + raw.substring(0, 500));
-    throw new Error("Could not parse ChordPro output from model");
-  }
-
-  var chart = {
-    title:      title,
-    artist:     artist,
-    musicalKey: spotifyKey || null,
-    tempo:      spotifyTempo || null,
-    capo:       0,
-    sections:   sections,
-  };
-  return validateAndRepairChart(chart);
-}
-
-async function saveChartToDB(chart, title, artist) {
-  var saveResult = await supabase.from("chord_charts").upsert({
-    title:       chart.title  || title,
-    artist:      chart.artist || artist,
-    musical_key: chart.musicalKey,
-    tempo:       chart.tempo,
-    capo:        chart.capo,
-    sections:    chart.sections,
-    source:      "ai_generated",
-    verified:    false,
-    play_count:  1
-  }, { onConflict: "title,artist" });
-  console.log("Supabase save:", saveResult.error ? "ERROR: " + saveResult.error.message : "OK");
-}
-
-// ─── Routes ───────────────────────────────────────────────────────────────────
-
-app.get("/", function(req, res) { res.send("Music Player 2.0 server is running!"); });
-
-app.get("/search", async function(req, res) {
+app.get('/search', async function(req, res) {
   const query = req.query.q;
-  if (!query) { res.json({ error: "No query" }); return; }
-  const url = "https://itunes.apple.com/search?term=" + encodeURIComponent(query) + "&entity=song&limit=8";
+  if (!query) { res.json({ error: 'No query' }); return; }
+  const url = 'https://itunes.apple.com/search?term=' + encodeURIComponent(query) + '&entity=song&limit=8';
   const response = await axios.get(url);
   const songs = response.data.results.map(function(song) {
-    return { title: song.trackName, artist: song.artistName, album: song.collectionName, year: song.releaseDate ? song.releaseDate.substring(0,4) : "Unknown", genre: song.primaryGenreName, artwork: song.artworkUrl100 };
+    return { title: song.trackName, artist: song.artistName, album: song.collectionName, year: song.releaseDate ? song.releaseDate.substring(0,4) : 'Unknown', genre: song.primaryGenreName, artwork: song.artworkUrl100 };
   });
   res.json({ count: songs.length, songs: songs });
 });
 
-// GET /chords?title=...&artist=... — fast Supabase-only lookup
-app.get("/chords", async function(req, res) {
-  var title = req.query.title, artist = req.query.artist;
-  if (!title || !artist) return res.status(400).json({ error: "title and artist required" });
+async function searchRealChords(title, artist) {
   try {
-    console.log("GET /chords:", title, "by", artist);
-    var chart = await fetchChartFromDB(title, artist);
-    if (chart) {
-      console.log("GET /chords: found in database");
-      return res.json({ found: true, fromDatabase: true, chart });
+    const query = encodeURIComponent(artist + ' ' + title + ' chords');
+    const searchUrl = 'https://www.googleapis.com/customsearch/v1?key=' + process.env.GOOGLE_API_KEY + '&cx=' + process.env.GOOGLE_CX + '&q=' + query + '&num=3';
+    const response = await axios.get(searchUrl, { timeout: 5000 });
+    const items = response.data.items || [];
+    var chordData = '';
+    for (var item of items) {
+      if (item.snippet) chordData += item.snippet + ' ';
     }
-    console.log("GET /chords: not found");
-    res.json({ found: false });
+    console.log('Chord search result:', chordData.substring(0, 200));
+    return chordData || null;
   } catch(e) {
-    console.error("GET /chords error:", e.message);
-    res.status(500).json({ error: e.message });
+    console.log('Chord search failed:', e.message);
+    return null;
   }
-});
+}
 
-// POST /chords { title, artist, force? } — generate + save
-//   force: true → bypass cache + overwrite any existing row.
-//   Used by the "Regenerate" button in the app for songs with wrong chords.
-app.post("/chords", async function(req, res) {
-  var title = req.body.title, artist = req.body.artist;
-  var force = req.body.force === true;
-  if (!title || !artist) return res.status(400).json({ error: "title and artist required" });
+async function searchUltimateGuitar(title, artist) {
   try {
-    console.log("POST /chords:", force ? "FORCE-regenerating" : "generating", "for", title, "by", artist);
-
-    // Check cache first (unless forcing a fresh generation)
-    if (!force) {
-      var existing = await fetchChartFromDB(title, artist);
-      if (existing) {
-        console.log("POST /chords: already in database, returning cached");
-        return res.json({ found: true, fromDatabase: true, chart: existing });
+    const query = encodeURIComponent(artist + ' ' + title);
+    const url = 'https://www.ultimate-guitar.com/search.php?search_type=title&value=' + query;
+    const response = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      timeout: 8000
+    });
+    const html = response.data;
+    const dataMatch = html.match(/window\.__NUXT__\s*=\s*({.+?});\s*<\/script>/s) ||
+                      html.match(/data-content="([^"]+)"/);
+    if (dataMatch) {
+      console.log('UG: Found data on page');
+      const jsonStr = dataMatch[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+      try {
+        const parsed = JSON.parse(jsonStr);
+        const results = parsed?.data?.results || parsed?.results || [];
+        const chordTab = results.find(r => r.type === 'Chords' || r.type === 'chords');
+        if (chordTab) {
+          console.log('UG: Found chord tab:', chordTab.song_name);
+          return chordTab;
+        }
+      } catch(e) {
+        console.log('UG: Parse error:', e.message);
       }
     }
-
-    // Fetch real lyrics and Spotify key in parallel
-    var [lyricsResult, spotifyResult] = await Promise.all([
-      fetchRealLyrics(title, artist),
-      lookupSpotifyKey(title, artist)
-    ]);
-    var { spotifyKey, spotifyTempo } = spotifyResult;
-
-    var chart = await generateChartWithAI(title, artist, null, spotifyKey, spotifyTempo, lyricsResult);
-    await saveChartToDB(chart, title, artist);
-    res.json({ found: true, fromDatabase: false, chart });
+    console.log('UG: No structured data found');
+    return null;
   } catch(e) {
-    console.error("POST /chords error:", e.message);
-    res.status(500).json({ error: e.message });
+    console.log('UG search failed:', e.message);
+    return null;
   }
-});
+}
 
-app.post("/identify", async function(req, res) {
+app.post('/identify', async function(req, res) {
   try {
     var audioBase64 = req.body.audioBase64;
     var mimeType = req.body.mimeType;
-    if (!audioBase64) { return res.status(400).json({ error: "No audio provided" }); }
-    var audioBuffer = Buffer.from(audioBase64, "base64");
+    if (!audioBase64) { return res.status(400).json({ error: 'No audio provided' }); }
+    var audioBuffer = Buffer.from(audioBase64, 'base64');
 
-    console.log("Step 1: Identifying with AudD...");
+    console.log('Step 1: Identifying with AudD...');
     var songInfo = null;
     try {
       var form = new FormData();
-      form.append("api_token", process.env.AUDD_API_KEY);
-      form.append("return", "spotify,apple_music");
-      form.append("file", audioBuffer, { filename: "recording.m4a", contentType: mimeType || "audio/m4a" });
-      var auddResponse = await axios.post("https://api.audd.io/", form, { headers: form.getHeaders() });
+      form.append('api_token', process.env.AUDD_API_KEY);
+      form.append('return', 'spotify,apple_music');
+      form.append('file', audioBuffer, { filename: 'recording.m4a', contentType: mimeType || 'audio/m4a' });
+      var auddResponse = await axios.post('https://api.audd.io/', form, { headers: form.getHeaders() });
       if (auddResponse.data.result) {
         songInfo = auddResponse.data.result;
-        console.log("Identified:", songInfo.title, "by", songInfo.artist);
-      } else {
-        console.log("Not identified by AudD");
+        console.log('Identified:', songInfo.title, 'by', songInfo.artist);
       }
-    } catch(e) { console.error("AudD error:", e.message); }
+    } catch(e) { console.error('AudD error:', e.message); }
 
-    console.log("Step 2: Checking Supabase chord database...");
+    console.log('Step 2: Searching Ultimate Guitar...');
+    var ugData = null;
     if (songInfo) {
-      try {
-        var cached = await fetchChartFromDB(songInfo.title, songInfo.artist);
-        if (cached) {
-          console.log("Returning from database!");
-          return res.json({ identified: true, fromDatabase: true, songInfo, chart: cached });
-        }
-      } catch(e) { console.log("DB lookup error:", e.message); }
+      ugData = await searchUltimateGuitar(songInfo.title, songInfo.artist);
     }
 
-    console.log("Step 3: Fetching real lyrics + Spotify key in parallel...");
-    var spotifyKey = null, spotifyTempo = null, realLyrics = null;
-    if (songInfo) {
-      var [lyricsResult, spotifyResult] = await Promise.all([
-        fetchRealLyrics(songInfo.title, songInfo.artist),
-        lookupSpotifyKey(songInfo.title, songInfo.artist)
-      ]);
-      realLyrics = lyricsResult;
-      spotifyKey = spotifyResult.spotifyKey;
-      spotifyTempo = spotifyResult.spotifyTempo;
-    }
+    console.log('Step 3: Generating chart with OpenAI...');
+    var systemPrompt = 'You are a world-class musician and chord transcriber. Generate accurate chord charts in JSON with: title, artist, confidence, musicalKey, tempo, capo, sections array. Each section has label and lines array. Each line has lyrics string and chords array. Each chord has chord string and position number (character index in lyrics where chord falls).';
 
-    console.log("Step 4: Generating chart with OpenAI gpt-4o...");
-    var chart;
-    if (songInfo) {
-      chart = await generateChartWithAI(songInfo.title, songInfo.artist, songInfo.release_date, spotifyKey, spotifyTempo, realLyrics);
-      await saveChartToDB(chart, songInfo.title, songInfo.artist);
+    var userPrompt;
+    if (songInfo && ugData) {
+      userPrompt = 'Generate a precise chord chart for "' + songInfo.title + '" by ' + songInfo.artist + '. I found this chord data from Ultimate Guitar: ' + JSON.stringify(ugData) + '. Use the EXACT chords from this data. Organize by section with real lyrics. Respond ONLY with valid JSON.';
+    } else if (songInfo) {
+      var spotifyData = songInfo.spotify ? JSON.stringify(songInfo.spotify) : 'not available';
+      var appleMusicData = songInfo.apple_music ? JSON.stringify(songInfo.apple_music) : 'not available';
+      userPrompt = 'Generate a 100% accurate chord chart for "' + songInfo.title + '" by ' + songInfo.artist + '. Released: ' + (songInfo.release_date || 'unknown') + '. Spotify data: ' + spotifyData + '. This is a well-known song - use your training knowledge to provide the EXACT chords as played in the original studio recording. Do NOT guess or use substitutions. Do NOT use relative minor/major replacements. Include the real key, real capo position, real tempo, and all main sections (Verse, Pre-Chorus, Chorus, Bridge) with actual lyrics and chord changes placed at the correct syllable positions. Respond ONLY with valid JSON.';
     } else {
-      chart = await generateChartWithAI("Unknown Song", "Unknown Artist", null, null, null, null);
+      userPrompt = 'Generate a chord chart for an unidentified song. Use C major as a starting point. Respond ONLY with valid JSON.';
     }
 
-    res.json({ identified: !!songInfo, fromDatabase: false, songInfo, chart });
+    var completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      max_tokens: 3000,
+      response_format: { type: 'json_object' },
+      temperature: 0.1,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ]
+    });
+
+    var chart = JSON.parse(completion.choices[0].message.content);
+    console.log("Chart:", JSON.stringify(chart).substring(0, 200));
+    res.json({ identified: !!songInfo, ugFound: !!ugData, songInfo: songInfo, chart: chart });
 
   } catch(error) {
-    console.error("Error:", error.message);
+    console.error('Error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-// PUT /chords { title, artist, sections, musicalKey, tempo, capo } — user correction, marks verified
-app.put("/chords", async function(req, res) {
-  res.setHeader("Content-Type", "application/json");
-  var title = req.body.title, artist = req.body.artist;
-  var sections = req.body.sections, musicalKey = req.body.musicalKey;
-  var tempo = req.body.tempo, capo = req.body.capo;
-  if (!title || !artist) return res.status(400).json({ error: "title and artist required" });
-  if (!Array.isArray(sections)) return res.status(400).json({ error: "sections must be an array" });
-  try {
-    console.log("PUT /chords: saving corrected chart for", title, "by", artist);
-    var saveResult = await supabase.from("chord_charts").upsert({
-      title:       title,
-      artist:      artist,
-      musical_key: musicalKey  || null,
-      tempo:       tempo       || null,
-      capo:        capo        != null ? capo : null,
-      sections:    sections,
-      source:      "user_corrected",
-      verified:    true,
-    }, { onConflict: "title,artist" });
-    if (saveResult.error) throw new Error(saveResult.error.message);
-    console.log("PUT /chords: saved OK");
-    return res.json({ success: true });
-  } catch(e) {
-    console.error("PUT /chords error:", e.message);
-    return res.status(500).json({ error: e.message });
-  }
-});
-
-app.listen(port, function() { console.log("Server started on port " + port); });
+app.listen(port, function() { console.log('Server started on port ' + port); });
