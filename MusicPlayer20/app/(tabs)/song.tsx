@@ -69,7 +69,20 @@ type ChordChart = {
   capo?:       number | string;
   sections:    Section[];
   verified?:   boolean;
+  source?:     string;  // "cifraclub" | "echords" | "ai_generated" | "user_corrected"
 };
+
+// Friendly label for the chord source — shown as a small attribution badge
+// so users know whether the chart came from a real chord site, the AI, or
+// a fellow user's correction.
+function sourceLabel(s?: string): string {
+  if (!s) return '';
+  if (s === 'cifraclub')      return 'from Cifra Club';
+  if (s === 'echords')        return 'from e-chords';
+  if (s === 'ai_generated')   return 'AI generated — may need fixing';
+  if (s === 'user_corrected') return 'verified by a user';
+  return s;
+}
 type LoadState = 'loading' | 'found' | 'notFound' | 'generating' | 'regenerating' | 'error';
 
 // Modal state: ci === null means "add new chord", otherwise edit existing at index ci
@@ -747,6 +760,21 @@ export default function SongScreen() {
               </View>
             )}
 
+            {/* Source attribution badge — only when not verified (verified
+                charts already show their own badge above) */}
+            {!display.verified && !editing && display.source && (
+              <View style={s.sourceRow}>
+                <Text
+                  style={[
+                    s.sourceTxt,
+                    display.source === 'ai_generated' && s.sourceTxtWarn,
+                  ]}
+                >
+                  ♪  {sourceLabel(display.source)}
+                </Text>
+              </View>
+            )}
+
             {/* Edit toolbar */}
             {editing && (
               <>
@@ -925,6 +953,10 @@ const s = StyleSheet.create({
   verifiedRow:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
   verifiedTxt:     { color: GOLD, fontSize: 12, fontWeight: '700', letterSpacing: 1.5 },
   verifiedEditLink:{ color: GOLD_DIM, fontSize: 10, letterSpacing: 1.5 },
+
+  sourceRow:       { marginBottom: 20 },
+  sourceTxt:       { color: GOLD_DIM, fontSize: 11, fontStyle: 'italic', letterSpacing: 0.5 },
+  sourceTxtWarn:   { color: MUTED },
 
   toolbar:      { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: BORDER },
   toolbarLabel: { color: GOLD_DIM, fontSize: 9, letterSpacing: 3 },

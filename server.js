@@ -4,6 +4,7 @@ const axios = require("axios");
 const cors = require("cors");
 const FormData = require("form-data");
 const OpenAI = require("openai");
+const cheerio = require("cheerio");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
@@ -26,7 +27,7 @@ async function fetchChartFromDB(title, artist) {
   if (!rows || rows.length === 0) return null;
   var r = rows[0];
   await supabase.from("chord_charts").update({ play_count: (r.play_count || 0) + 1 }).eq("id", r.id);
-  return { title: r.title, artist: r.artist, musicalKey: r.musical_key, tempo: r.tempo, capo: r.capo, sections: r.sections, verified: r.verified };
+  return { title: r.title, artist: r.artist, musicalKey: r.musical_key, tempo: r.tempo, capo: r.capo, sections: r.sections, verified: r.verified, source: r.source };
 }
 
 async function lookupSpotifyKey(title, artist) {
@@ -426,7 +427,7 @@ async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spoti
   return validateAndRepairChart(chart);
 }
 
-async function saveChartToDB(chart, title, artist) {
+async function saveChartToDB(chart, title, artist, source) {
   var saveResult = await supabase.from("chord_charts").upsert({
     title:       chart.title  || title,
     artist:      chart.artist || artist,
@@ -434,11 +435,278 @@ async function saveChartToDB(chart, title, artist) {
     tempo:       chart.tempo,
     capo:        chart.capo,
     sections:    chart.sections,
-    source:      "ai_generated",
+    source:      source || "ai_generated",
     verified:    false,
     play_count:  1
   }, { onConflict: "title,artist" });
-  console.log("Supabase save:", saveResult.error ? "ERROR: " + saveResult.error.message : "OK");
+  console.log("Supabase save:", saveResult.error ? "ERROR: " + saveResult.error.message : "OK (source=" + (source || "ai_generated") + ")");
+}
+
+// ─── Chord-source scrapers (Cifra Club + e-chords) ───────────────────────────
+// Tried BEFORE the LLM. If a real chord site has the song, the LLM is never
+// invoked and the user gets actual chords from a human-curated source.
+// We slugify title/artist into the canonical URL each site uses; if the
+// direct URL 404s we fall back to the site's search page.
+
+function stripAccents(s) {
+  return String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
+function slugify(s) {
+  return stripAccents(String(s || ""))
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/['"`´’]/g, "")
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+// A real-browser User-Agent — sites block axios/node-fetch defaults.
+var SCRAPER_HEADERS = {
+  "User-Agent":       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Accept":           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language":  "en-US,en;q=0.9",
+};
+
+// ── Cifra Club ──────────────────────────────────────────────────────────────
+// Songs live at https://www.cifraclub.com.br/<artist-slug>/<song-slug>/
+// Chord chart is in <pre class="cifra_chord"> with <b> tags wrapping chords.
+
+async function fetchChartFromCifra(rawTitle, rawArtist) {
+  var artist = normalizeForLookup(rawArtist);
+  var title  = normalizeForLookup(rawTitle);
+  var artistSlug = slugify(artist);
+  var titleSlug  = slugify(title);
+  if (!artistSlug || !titleSlug) return null;
+
+  // 1) Direct canonical URL — fast path
+  var directUrl = "https://www.cifraclub.com.br/" + artistSlug + "/" + titleSlug + "/";
+  console.log("Cifra Club: trying " + directUrl);
+  var html = await fetchHtml(directUrl);
+  if (html) {
+    var chart = parseCifraClubHtml(html, rawTitle, rawArtist);
+    if (chart && chart.sections.length > 0) {
+      console.log("Cifra Club: parsed " + chart.sections.length + " sections from direct URL");
+      return chart;
+    }
+  }
+
+  // 2) Search fallback — Cifra Club search returns a results page we scan for the first song link
+  try {
+    var q = encodeURIComponent(title + " " + artist);
+    var searchUrl = "https://www.cifraclub.com.br/?q=" + q;
+    console.log("Cifra Club: searching " + searchUrl);
+    var sres = await axios.get(searchUrl, { headers: SCRAPER_HEADERS, timeout: 8000, validateStatus: function(s){return s<500;} });
+    if (sres.status !== 200) { console.log("Cifra Club: search " + sres.status); return null; }
+    var $ = cheerio.load(sres.data);
+    // Cifra Club search results: links to /artist-slug/song-slug/
+    var songLink = null;
+    $("a").each(function() {
+      if (songLink) return;
+      var href = $(this).attr("href") || "";
+      // Filter for song-page URLs (have artist + song segments, no extra suffixes)
+      if (/^\/[a-z0-9-]+\/[a-z0-9-]+\/?$/.test(href)) {
+        songLink = href.startsWith("http") ? href : "https://www.cifraclub.com.br" + href;
+      }
+    });
+    if (!songLink) { console.log("Cifra Club: no song link in search results"); return null; }
+    console.log("Cifra Club: search found " + songLink);
+    var html2 = await fetchHtml(songLink);
+    if (!html2) return null;
+    var chart2 = parseCifraClubHtml(html2, rawTitle, rawArtist);
+    if (chart2 && chart2.sections.length > 0) {
+      console.log("Cifra Club: parsed " + chart2.sections.length + " sections from search");
+      return chart2;
+    }
+  } catch(e) { console.log("Cifra Club search error:", e.message); }
+  return null;
+}
+
+function parseCifraClubHtml(html, title, artist) {
+  var $ = cheerio.load(html);
+
+  // Find the chord-chart pre. Cifra Club uses class "cifra_chord", but the
+  // exact class varies; fall back to any pre containing multiple <b> tags
+  // (each <b> is a chord name).
+  var pre = $("pre.cifra_chord, pre[class*='cifra']").first();
+  if (!pre.length) {
+    $("pre").each(function() {
+      if (pre.length) return;
+      if ($(this).find("b").length >= 3) pre = $(this);
+    });
+  }
+  if (!pre.length) return null;
+
+  // Walk the pre's children: text nodes → lyrics, <b>/<strong> → chord tags.
+  // Reconstruct as ChordPro text ("[G]Hello dar[Am]ling") so we can reuse
+  // our existing parseChordPro().
+  var chordProText = "";
+  pre.contents().each(function() {
+    if (this.type === "text") {
+      chordProText += this.data;
+    } else if (this.type === "tag" && (this.name === "b" || this.name === "strong")) {
+      var c = $(this).text().trim();
+      if (c) chordProText += "[" + c + "]";
+    } else if (this.type === "tag" && this.name === "br") {
+      chordProText += "\n";
+    } else if (this.type === "tag") {
+      chordProText += $(this).text();
+    }
+  });
+
+  // Cifra Club section headers are plain-text lines like "Intro", "Verse 1",
+  // "Refrão" (Portuguese), "Estrofe". Normalize to [Section] form for the parser.
+  var SECTION_WORDS = "intro|verse|verso|estrofe|chorus|refrão|refrao|pre[- ]?chorus|pre[- ]?refrão|bridge|ponte|outro|hook|solo|interlude|interlúdio";
+  var headerRe = new RegExp("^(" + SECTION_WORDS + ")(\\s*\\d*)?\\s*:?$", "gim");
+  chordProText = chordProText.replace(headerRe, function(_, word, num) {
+    var label = (word + (num || "")).trim();
+    // Translate PT-BR labels to standard English ones
+    label = label.replace(/refr[ãa]o/i, "Chorus").replace(/estrofe|verso/i, "Verse").replace(/ponte/i, "Bridge").replace(/interlúdio/i, "Interlude");
+    return "[" + label + "]";
+  });
+
+  var sections = parseChordPro(chordProText);
+  if (sections.length === 0) return null;
+
+  // Musical key — Cifra Club shows "Tom: <key>"
+  var musicalKey = null;
+  var bodyText = $("body").text();
+  var keyMatch = bodyText.match(/Tom:\s*([A-G][#b]?m?)/);
+  if (keyMatch) {
+    var k = keyMatch[1];
+    musicalKey = /m$/.test(k) ? k.replace(/m$/, " minor") : k + " major";
+  }
+
+  // Capo — "Capotraste na Xª casa"
+  var capo = 0;
+  var capoMatch = bodyText.match(/Capotraste\s+na\s+(\d+)/i);
+  if (capoMatch) capo = parseInt(capoMatch[1], 10) || 0;
+
+  return validateAndRepairChart({
+    title:      title,
+    artist:     artist,
+    musicalKey: musicalKey,
+    tempo:      null,
+    capo:       capo,
+    sections:   sections,
+  });
+}
+
+// ── e-chords ─────────────────────────────────────────────────────────────────
+// Songs live at https://www.e-chords.com/chords/<artist-slug>/<song-slug>
+// Chord chart in <pre id="core"> with <u> tags wrapping chords.
+
+async function fetchChartFromEchords(rawTitle, rawArtist) {
+  var artist = normalizeForLookup(rawArtist);
+  var title  = normalizeForLookup(rawTitle);
+  var artistSlug = slugify(artist);
+  var titleSlug  = slugify(title);
+  if (!artistSlug || !titleSlug) return null;
+
+  var url = "https://www.e-chords.com/chords/" + artistSlug + "/" + titleSlug;
+  console.log("e-chords: trying " + url);
+  var html = await fetchHtml(url);
+  if (!html) return null;
+  var chart = parseEchordsHtml(html, rawTitle, rawArtist);
+  if (chart && chart.sections.length > 0) {
+    console.log("e-chords: parsed " + chart.sections.length + " sections");
+    return chart;
+  }
+  return null;
+}
+
+function parseEchordsHtml(html, title, artist) {
+  var $ = cheerio.load(html);
+  var pre = $("pre#core, pre.core").first();
+  if (!pre.length) {
+    $("pre").each(function() {
+      if (pre.length) return;
+      if ($(this).find("u").length >= 3) pre = $(this);
+    });
+  }
+  if (!pre.length) return null;
+
+  var chordProText = "";
+  pre.contents().each(function() {
+    if (this.type === "text") {
+      chordProText += this.data;
+    } else if (this.type === "tag" && (this.name === "u" || this.name === "b")) {
+      var c = $(this).text().trim();
+      if (c) chordProText += "[" + c + "]";
+    } else if (this.type === "tag" && this.name === "br") {
+      chordProText += "\n";
+    } else if (this.type === "tag") {
+      chordProText += $(this).text();
+    }
+  });
+
+  // e-chords uses bracketed section headers already: [Intro], [Verse], etc.
+  // Sometimes plain text. Normalize bare lines.
+  var headerRe = /^(intro|verse|chorus|pre[- ]?chorus|bridge|outro|hook|solo|interlude)(\s*\d*)?\s*:?$/gim;
+  chordProText = chordProText.replace(headerRe, function(_, w, n) { return "[" + (w + (n || "")).trim() + "]"; });
+
+  var sections = parseChordPro(chordProText);
+  if (sections.length === 0) return null;
+
+  var musicalKey = null;
+  var bodyText = $("body").text();
+  var keyMatch = bodyText.match(/Tone:\s*([A-G][#b]?(?:\s+(?:major|minor))?)/i);
+  if (keyMatch) musicalKey = keyMatch[1];
+
+  return validateAndRepairChart({
+    title:      title,
+    artist:     artist,
+    musicalKey: musicalKey,
+    tempo:      null,
+    capo:       0,
+    sections:   sections,
+  });
+}
+
+// Common HTML fetcher with browser-like headers, short timeout, no error on
+// non-2xx (we want to inspect the status and fall through gracefully).
+async function fetchHtml(url) {
+  try {
+    var res = await axios.get(url, {
+      headers:         SCRAPER_HEADERS,
+      timeout:         8000,
+      validateStatus:  function(s) { return s < 500; },
+      maxRedirects:    5,
+    });
+    if (res.status !== 200) {
+      console.log("fetchHtml: " + res.status + " " + url);
+      return null;
+    }
+    return res.data;
+  } catch(e) {
+    console.log("fetchHtml error: " + e.message);
+    return null;
+  }
+}
+
+// ── Orchestrator: try real chord sources → fall back to LLM ─────────────────
+// Returns { chart, source } where source is one of:
+//   "cifraclub", "echords", "ai_generated"
+
+async function fetchChartFromSources(title, artist, releaseDate) {
+  console.log("Sources: trying Cifra Club for", title, "by", artist);
+  var chart = await fetchChartFromCifra(title, artist);
+  if (chart) return { chart: chart, source: "cifraclub" };
+
+  console.log("Sources: trying e-chords for", title, "by", artist);
+  chart = await fetchChartFromEchords(title, artist);
+  if (chart) return { chart: chart, source: "echords" };
+
+  // Last resort — LLM with our existing lyrics + Spotify pipeline
+  console.log("Sources: no real source had the song, falling back to AI");
+  var [lyricsResult, spotifyResult] = await Promise.all([
+    fetchRealLyrics(title, artist),
+    lookupSpotifyKey(title, artist),
+  ]);
+  chart = await generateChartWithAI(title, artist, releaseDate || null, spotifyResult.spotifyKey, spotifyResult.spotifyTempo, lyricsResult);
+  return { chart: chart, source: "ai_generated" };
 }
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
@@ -494,16 +762,11 @@ app.post("/chords", async function(req, res) {
       }
     }
 
-    // Fetch real lyrics and Spotify key in parallel
-    var [lyricsResult, spotifyResult] = await Promise.all([
-      fetchRealLyrics(title, artist),
-      lookupSpotifyKey(title, artist)
-    ]);
-    var { spotifyKey, spotifyTempo } = spotifyResult;
-
-    var chart = await generateChartWithAI(title, artist, null, spotifyKey, spotifyTempo, lyricsResult);
-    await saveChartToDB(chart, title, artist);
-    res.json({ found: true, fromDatabase: false, chart });
+    // Try real chord sources (Cifra Club → e-chords) first, LLM as fallback.
+    var result = await fetchChartFromSources(title, artist, null);
+    result.chart.source = result.source;
+    await saveChartToDB(result.chart, title, artist, result.source);
+    res.json({ found: true, fromDatabase: false, chart: result.chart, source: result.source });
   } catch(e) {
     console.error("POST /chords error:", e.message);
     res.status(500).json({ error: e.message });
@@ -544,28 +807,21 @@ app.post("/identify", async function(req, res) {
       } catch(e) { console.log("DB lookup error:", e.message); }
     }
 
-    console.log("Step 3: Fetching real lyrics + Spotify key in parallel...");
-    var spotifyKey = null, spotifyTempo = null, realLyrics = null;
+    console.log("Step 3: Looking up chord chart from real sources or AI...");
+    var chart, source;
     if (songInfo) {
-      var [lyricsResult, spotifyResult] = await Promise.all([
-        fetchRealLyrics(songInfo.title, songInfo.artist),
-        lookupSpotifyKey(songInfo.title, songInfo.artist)
-      ]);
-      realLyrics = lyricsResult;
-      spotifyKey = spotifyResult.spotifyKey;
-      spotifyTempo = spotifyResult.spotifyTempo;
-    }
-
-    console.log("Step 4: Generating chart with OpenAI gpt-4o...");
-    var chart;
-    if (songInfo) {
-      chart = await generateChartWithAI(songInfo.title, songInfo.artist, songInfo.release_date, spotifyKey, spotifyTempo, realLyrics);
-      await saveChartToDB(chart, songInfo.title, songInfo.artist);
+      var result = await fetchChartFromSources(songInfo.title, songInfo.artist, songInfo.release_date);
+      chart  = result.chart;
+      source = result.source;
+      chart.source = source;
+      await saveChartToDB(chart, songInfo.title, songInfo.artist, source);
     } else {
-      chart = await generateChartWithAI("Unknown Song", "Unknown Artist", null, null, null, null);
+      // No song info at all — last-ditch LLM call with placeholder labels.
+      chart  = await generateChartWithAI("Unknown Song", "Unknown Artist", null, null, null, null);
+      source = "ai_generated";
     }
 
-    res.json({ identified: !!songInfo, fromDatabase: false, songInfo, chart });
+    res.json({ identified: !!songInfo, fromDatabase: false, songInfo, chart, source });
 
   } catch(error) {
     console.error("Error:", error.message);
