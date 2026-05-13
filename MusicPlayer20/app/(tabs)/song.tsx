@@ -11,6 +11,7 @@ import {
   Modal,
   Platform,
   KeyboardAvoidingView,
+  Alert,
 } from 'react-native';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { useState, useEffect, useCallback } from 'react';
@@ -54,7 +55,7 @@ type ChordChart = {
   sections:    Section[];
   verified?:   boolean;
 };
-type LoadState = 'loading' | 'found' | 'notFound' | 'generating' | 'error';
+type LoadState = 'loading' | 'found' | 'notFound' | 'generating' | 'regenerating' | 'error';
 
 // Modal state: ci === null means "add new chord", otherwise edit existing at index ci
 type ChordModal = {
@@ -436,6 +437,32 @@ export default function SongScreen() {
     } catch (e: any) { setErrorMsg(e.message); setLoadState('error'); }
   }
 
+  // Force a fresh AI generation, overwriting the cached chart.
+  // Used when the existing chords are wrong — one tap, no manual editing.
+  async function regenerateChords() {
+    setLoadState('regenerating'); setErrorMsg('');
+    try {
+      const res  = await fetch(`${API}/chords`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, artist, force: true }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setChart(data.chart); setLoadState('found');
+    } catch (e: any) { setErrorMsg(e.message); setLoadState('error'); }
+  }
+
+  function confirmRegenerate() {
+    Alert.alert(
+      'Regenerate chord chart?',
+      'This asks the AI to start over for this song. The current chart will be replaced. Takes about 15 seconds.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Regenerate', style: 'destructive', onPress: regenerateChords },
+      ],
+    );
+  }
+
   // ─── Edit ──────────────────────────────────────────────────────────────────
 
   function startEdit() {
@@ -660,6 +687,15 @@ export default function SongScreen() {
           </View>
         )}
 
+        {/* Regenerating */}
+        {loadState === 'regenerating' && (
+          <View style={s.centered}>
+            <ActivityIndicator color={GOLD} size="large" />
+            <Text style={s.centeredTxt}>Regenerating chord chart...</Text>
+            <Text style={s.centeredSub}>Re-running the AI with fresh context — about 15 seconds</Text>
+          </View>
+        )}
+
         {/* Error */}
         {loadState === 'error' && (
           <View style={s.centered}>
@@ -789,12 +825,25 @@ export default function SongScreen() {
               </View>
             ))}
 
-            {/* EDIT CHORDS button */}
+            {/* EDIT CHORDS + REGENERATE buttons */}
             {!editing && (
               <View style={s.editBtnWrap}>
                 <TouchableOpacity style={s.editBtn} onPress={startEdit} activeOpacity={0.8}>
                   <Text style={s.editBtnTxt}>EDIT CHORDS</Text>
                 </TouchableOpacity>
+
+                {/* Regenerate — only offered when the chart is AI-generated.
+                    Verified (user-corrected) charts should not be overwritten by an LLM guess. */}
+                {!display.verified && (
+                  <TouchableOpacity style={s.regenBtn} onPress={confirmRegenerate} activeOpacity={0.8}>
+                    <Text style={s.regenBtnTxt}>↻  REGENERATE CHART</Text>
+                  </TouchableOpacity>
+                )}
+                {!display.verified && (
+                  <Text style={s.regenHint}>
+                    Chords look wrong? Tap Regenerate to ask the AI again — usually fixes a bad guess. No manual editing needed.
+                  </Text>
+                )}
               </View>
             )}
           </View>
@@ -882,4 +931,7 @@ const s = StyleSheet.create({
   editBtnWrap: { marginTop: 36, paddingTop: 24, borderTopWidth: 1, borderTopColor: BORDER },
   editBtn:     { borderWidth: 1, borderColor: GOLD_DIM, paddingVertical: 14, alignItems: 'center' },
   editBtnTxt:  { color: GOLD_DIM, fontSize: 11, fontWeight: '700', letterSpacing: 3 },
+  regenBtn:    { borderWidth: 1, borderColor: GOLD_DIM, paddingVertical: 14, alignItems: 'center', marginTop: 10, backgroundColor: '#16130e' },
+  regenBtnTxt: { color: GOLD, fontSize: 11, fontWeight: '700', letterSpacing: 3 },
+  regenHint:   { color: MUTED, fontSize: 11, lineHeight: 16, marginTop: 10, textAlign: 'center', paddingHorizontal: 12 },
 });
