@@ -43,6 +43,21 @@ const RED      = '#c0392b';
 
 const API = 'https://music-player-production-524a.up.railway.app';
 
+// Parse a fetch response as JSON, but if the body isn't JSON (e.g. the server
+// returned an HTML error page during a 502/504/etc.), surface a readable
+// message instead of the cryptic "JSON Parse error: Unexpected character :<".
+async function readJsonOrThrow(res: Response): Promise<any> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    if (text.trim().startsWith('<')) {
+      throw new Error(`Server unreachable (HTTP ${res.status}) — please try again in a moment`);
+    }
+    throw new Error(`Server returned non-JSON (HTTP ${res.status})`);
+  }
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Section = { label: string; lines?: Line[] };
@@ -415,7 +430,7 @@ export default function SongScreen() {
     setErrorMsg('');
     try {
       const res  = await fetch(`${API}/chords?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}`);
-      const data = await res.json();
+      const data = await readJsonOrThrow(res);
       if (data.error) throw new Error(data.error);
       if (data.found) { setChart(data.chart); setLoadState('found'); }
       else              setLoadState('notFound');
@@ -431,7 +446,7 @@ export default function SongScreen() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title, artist }),
       });
-      const data = await res.json();
+      const data = await readJsonOrThrow(res);
       if (data.error) throw new Error(data.error);
       setChart(data.chart); setLoadState('found');
     } catch (e: any) { setErrorMsg(e.message); setLoadState('error'); }
@@ -446,7 +461,7 @@ export default function SongScreen() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title, artist, force: true }),
       });
-      const data = await res.json();
+      const data = await readJsonOrThrow(res);
       if (data.error) throw new Error(data.error);
       setChart(data.chart); setLoadState('found');
     } catch (e: any) { setErrorMsg(e.message); setLoadState('error'); }
