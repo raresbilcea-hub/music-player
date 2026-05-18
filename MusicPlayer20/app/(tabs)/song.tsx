@@ -77,10 +77,11 @@ type ChordChart = {
 // a fellow user's correction.
 function sourceLabel(s?: string): string {
   if (!s) return '';
-  if (s === 'cifraclub')      return 'from Cifra Club';
-  if (s === 'echords')        return 'from e-chords';
-  if (s === 'ai_generated')   return 'AI generated — may need fixing';
-  if (s === 'user_corrected') return 'verified by a user';
+  if (s === 'ultimate_guitar') return 'from Ultimate-Guitar';
+  if (s === 'cifraclub')       return 'from Cifra Club';
+  if (s === 'echords')         return 'from e-chords';
+  if (s === 'ai_generated')    return 'AI generated — may need fixing';
+  if (s === 'user_corrected')  return 'verified by a user';
   return s;
 }
 type LoadState = 'loading' | 'found' | 'notFound' | 'generating' | 'regenerating' | 'error';

@@ -474,6 +474,118 @@ var SCRAPER_HEADERS = {
 // Songs live at https://www.cifraclub.com.br/<artist-slug>/<song-slug>/
 // Chord chart is in <pre class="cifra_chord"> with <b> tags wrapping chords.
 
+// ── Ultimate-Guitar ─────────────────────────────────────────────────────────
+// UG embeds all page data as JSON inside <div class="js-store" data-content="...">
+// Search:   https://www.ultimate-guitar.com/search.php?title=<q>&type=300  (300 = Chords)
+// Tab page: https://tabs.ultimate-guitar.com/tab/<artist-slug>/<song-slug>-<id>
+// Wiki-tab format: [ch]G[/ch]Hello [ch]Am[/ch]world  →  we just rewrite [ch]X[/ch] as [X].
+//
+// Caveats:
+//   - UG is behind Cloudflare. With a real-browser UA we usually pass through.
+//     If we hit a JS challenge page, the parse will find no js-store and return null,
+//     and the orchestrator falls through to Cifra Club / e-chords / AI. Safe failure.
+
+async function fetchChartFromUG(rawTitle, rawArtist) {
+  var artist = normalizeForLookup(rawArtist);
+  var title  = normalizeForLookup(rawTitle);
+  if (!artist || !title) return null;
+
+  // Step 1 — search UG for chord tabs only (type=300)
+  var searchUrl = "https://www.ultimate-guitar.com/search.php?title=" +
+                  encodeURIComponent(title + " " + artist) +
+                  "&search_type=title&type=300";
+  console.log("UG: searching " + searchUrl);
+  var searchHtml = await fetchHtml(searchUrl);
+  if (!searchHtml) return null;
+
+  var $ = cheerio.load(searchHtml);
+  var storeRaw = $(".js-store").attr("data-content");
+  if (!storeRaw) { console.log("UG: no js-store on search page (Cloudflare?)"); return null; }
+
+  var bestTabUrl = null;
+  var bestRating = -1;
+  try {
+    var storeData = JSON.parse(storeRaw);
+    var results = (storeData && storeData.store && storeData.store.page && storeData.store.page.data && storeData.store.page.data.results) || [];
+
+    // Filter to chord-type tabs and pick the highest rating × votes score.
+    // Many obscure songs have only 1 result; popular songs have dozens.
+    for (var i = 0; i < results.length; i++) {
+      var r = results[i];
+      if (!r) continue;
+      var typeName = r.type || r.type_name;
+      if (typeName !== "Chords" && typeName !== "chords") continue;
+      var score = (r.rating || 0) * Math.log(1 + (r.votes || 0));
+      if (score > bestRating && r.tab_url) {
+        bestRating = score;
+        bestTabUrl = r.tab_url;
+      }
+    }
+  } catch(e) { console.log("UG search parse error:", e.message); return null; }
+
+  if (!bestTabUrl) { console.log("UG: no chord-type results in search"); return null; }
+  console.log("UG: best tab " + bestTabUrl + " (score " + bestRating.toFixed(2) + ")");
+
+  // Step 2 — fetch the tab page and pull the wiki_tab content
+  var tabHtml = await fetchHtml(bestTabUrl);
+  if (!tabHtml) return null;
+  return parseUGTabPage(tabHtml, rawTitle, rawArtist);
+}
+
+function parseUGTabPage(html, title, artist) {
+  var $ = cheerio.load(html);
+  var storeRaw = $(".js-store").attr("data-content");
+  if (!storeRaw) { console.log("UG: no js-store on tab page"); return null; }
+
+  var data;
+  try { data = JSON.parse(storeRaw); } catch(e) { console.log("UG tab JSON parse error:", e.message); return null; }
+
+  var tabView = data && data.store && data.store.page && data.store.page.data && data.store.page.data.tab_view;
+  var rawContent = tabView && tabView.wiki_tab && tabView.wiki_tab.content;
+  if (!rawContent) { console.log("UG: no wiki_tab content on tab page"); return null; }
+
+  // UG's content uses:
+  //   [ch]G[/ch]  → chord markers (we convert to ChordPro [G])
+  //   [tab]...[/tab]  → wraps "tab-formatted" blocks (we strip markers but keep content)
+  //   plain section headers like "Verse 1", "Chorus" on their own lines
+  var chordProText = String(rawContent)
+    .replace(/\[ch\]([^\[\]]+)\[\/ch\]/g, "[$1]")
+    .replace(/\[\/?tab\]/g, "");
+
+  // Strip standalone metadata lines that UG sometimes puts at the top
+  // ("Capo: 2nd fret", "Tempo: 90 BPM", "Key: Db major", "Tuning: EADGBE", ...).
+  // Without this, those lines become a phantom first "Verse" section.
+  chordProText = chordProText.replace(
+    /^(?:Capo|Tempo|Key|Tonality|Tuning|BPM|Difficulty|Author|Submitted by|Strumming)\s*[:\-].*$/gim,
+    ""
+  );
+
+  // Normalize plain-text headers to [Section] form so parseChordPro picks them up
+  var SECTION_WORDS = "intro|verse|pre[- ]?chorus|chorus|post[- ]?chorus|bridge|hook|interlude|instrumental|solo|outro|breakdown|refrain|tag|coda|ending";
+  var headerRe = new RegExp("^(" + SECTION_WORDS + ")(\\s*\\d*)?\\s*:?$", "gim");
+  chordProText = chordProText.replace(headerRe, function(_, w, n) {
+    return "[" + (w + (n || "")).trim() + "]";
+  });
+
+  var sections = parseChordPro(chordProText);
+  if (sections.length === 0) { console.log("UG: parseChordPro produced 0 sections"); return null; }
+
+  // UG provides metadata directly — use what they tell us
+  var meta = (tabView && tabView.meta) || {};
+  var musicalKey = meta.tonality_name || data.store.page.data.tab && data.store.page.data.tab.tonality_name || null;
+  var capo       = meta.capo || (data.store.page.data.tab && data.store.page.data.tab.capo) || 0;
+  var tempo      = (data.store.page.data.tab && data.store.page.data.tab.tempo) || null;
+
+  return validateAndRepairChart({
+    title:      title,
+    artist:     artist,
+    musicalKey: musicalKey,
+    tempo:      tempo,
+    capo:       parseInt(capo, 10) || 0,
+    sections:   sections,
+  });
+}
+
 async function fetchChartFromCifra(rawTitle, rawArtist) {
   var artist = normalizeForLookup(rawArtist);
   var title  = normalizeForLookup(rawTitle);
@@ -691,8 +803,12 @@ async function fetchHtml(url) {
 //   "cifraclub", "echords", "ai_generated"
 
 async function fetchChartFromSources(title, artist, releaseDate) {
+  console.log("Sources: trying Ultimate-Guitar for", title, "by", artist);
+  var chart = await fetchChartFromUG(title, artist);
+  if (chart) return { chart: chart, source: "ultimate_guitar" };
+
   console.log("Sources: trying Cifra Club for", title, "by", artist);
-  var chart = await fetchChartFromCifra(title, artist);
+  chart = await fetchChartFromCifra(title, artist);
   if (chart) return { chart: chart, source: "cifraclub" };
 
   console.log("Sources: trying e-chords for", title, "by", artist);
