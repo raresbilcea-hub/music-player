@@ -2,132 +2,139 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Two-part project
+This is the **backend** for Music Player 2.0. The mobile app lives in `MusicPlayer20/` and has its own `CLAUDE.md`.
 
-The repo has two independent runnable pieces:
+## Commands
 
-| Part | Directory | Purpose |
-|------|-----------|---------|
-| Backend API | `/` (root) | Node.js/Express server, deployed on Railway |
-| Mobile app | `MusicPlayer20/` | React Native + Expo (iOS-first) |
-
----
-
-## Backend (`/server.js`)
-
-### Run locally
 ```bash
-# from repo root
-node server.js          # starts on port 3000
+node server.js          # start on port 3000
 ```
 
-Requires a `.env` with:
-- `OPENAI_API_KEY` — GPT-4o for chord generation
-- `SUPABASE_URL` / `SUPABASE_KEY` — chord chart storage and auth
-- `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` — key & tempo lookup
-- `AUDD_API_KEY` — audio fingerprinting (`/identify`)
+No build step, no test suite. All logic is in the single file `server.js`.
 
-### API routes
+## Environment (`.env`)
+
+| Variable | Purpose |
+|----------|---------|
+| `OPENAI_API_KEY` | GPT-4o chord generation |
+| `SUPABASE_URL` / `SUPABASE_KEY` | chord chart storage + auth |
+| `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | audio analysis (key & tempo) |
+| `AUDD_API_KEY` | audio fingerprinting (`/identify`) |
+
+## Routes
+
 | Method | Route | Purpose |
 |--------|-------|---------|
-| GET | `/search?q=` | iTunes song search |
-| GET | `/chords?title=&artist=` | Supabase cache lookup only (fast) |
-| POST | `/chords` `{ title, artist, force? }` | Generate & save chart; `force:true` bypasses cache |
-| PUT | `/chords` | User correction — marks chart `verified:true` |
-| POST | `/identify` | Audio fingerprint → AudD → chord chart |
+| GET | `/search?q=` | Proxy to iTunes search, returns `{ count, songs[] }` |
+| GET | `/chords?title=&artist=` | Supabase cache lookup only — fast, no generation |
+| POST | `/chords` `{ title, artist, force? }` | Generate & cache; `force:true` bypasses cache and overwrites |
+| PUT | `/chords` `{ title, artist, sections, musicalKey, tempo, capo }` | Save user correction, marks `verified:true` |
+| POST | `/identify` `{ audioBase64, mimeType }` | AudD fingerprint → chord chart |
 
-### Chord chart pipeline (POST /chords)
-The server tries sources in order, stopping at the first success:
-1. **Ultimate-Guitar** — parses `js-store` JSON embedded in HTML; converts `[ch]X[/ch]` → ChordPro
-2. **Cifra Club** — parses `<pre class="cifra_chord">` with `<b>` chord tags
-3. **e-chords** — parses `<pre id="core">` with `<u>` chord tags
-4. **AI fallback** — GPT-4o generates in ChordPro inline format; lyrics fetched first from lrclib → lyrics.ovh, Spotify provides confirmed key/tempo to constrain the model
+## Chord chart pipeline
 
-### ChordPro format (critical to understand)
-The server and AI both use ChordPro *inline* format, not character-offset JSON:
+Every entry point that needs a chart calls `fetchChartFromSources(title, artist, releaseDate)`, which tries sources in order and stops at the first success:
+
+```
+1. Ultimate-Guitar  (fetchChartFromUG)
+2. Cifra Club       (fetchChartFromCifra)
+3. e-chords         (fetchChartFromEchords)
+4. AI fallback      (generateChartWithAI)
+     └─ lyrics:  lrclib /get → lrclib /search → lyrics.ovh
+     └─ key/bpm: Spotify audio-analysis
+```
+
+The Supabase cache is checked **before** this cascade in `POST /chords` (unless `force:true`) and in `POST /identify`. `GET /chords` only hits the cache.
+
+## ChordPro inline format
+
+All three scrapers and the AI produce the same intermediate format before any JSON is built:
+
 ```
 [Verse 1]
 [G]Hello dar[Am]ling, the [C]days drift [G]by
-```
-`parseChordPro()` in `server.js` converts this to `{ sections: [{ label, lines: [{ lyrics, chords: [{ chord, position }] }] }] }`. Position = character index in the lyrics string. The LLM inserts `[Chord]` tags; the server counts positions — this is the key reliability design: it removes character counting from the LLM's responsibility.
-
----
-
-## Mobile app (`MusicPlayer20/`)
-
-### Run locally
-```bash
-cd MusicPlayer20
-npm install
-npx expo start          # opens Expo dev server
-npx expo start --ios    # iOS simulator
+[Em]Time keeps [C]turning, [G]you and [D]I
 ```
 
-### Lint
-```bash
-cd MusicPlayer20
-npm run lint            # expo lint (ESLint)
+`parseChordPro(text)` converts this to the wire format:
+```js
+{ label: "Verse 1", lines: [
+  { lyrics: "Hello darling, the days drift by",
+    chords: [{ chord: "G", position: 0 }, { chord: "Am", position: 10 }, ...] }
+]}
 ```
 
-No test suite exists yet.
+`position` is the character index in `lyrics` where the chord sounds. The LLM inserts `[Chord]` tags; the server counts positions. This removes character counting from the LLM's job, which was the main source of misaligned chords.
 
-### Environment
-Copy `.env.example` → `.env` inside `MusicPlayer20/`. The app reads `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_KEY`.
+After parsing, every chart passes through `validateAndRepairChart()` which clamps out-of-range positions, sorts chords by position, drops empty lines, and coerces all fields to the correct types.
 
-The backend URL is hardcoded in `app/(tabs)/index.tsx` and `app/(tabs)/song.tsx` as:
-```
-https://music-player-production-524a.up.railway.app
-```
+## Scrapers
 
-### Routing (Expo Router file-based)
-```
-app/
-  _layout.tsx          — root layout, wraps AuthProvider
-  (tabs)/
-    _layout.tsx        — bottom tab bar (Home, Songs, Record)
-    index.tsx          — Home: iTunes search + recent songs
-    song.tsx           — Song history list + chord chart viewer/editor
-    record.tsx         — Audio identification + live recording
-  login.tsx / register.tsx / profile.tsx
-```
+### Ultimate-Guitar (`fetchChartFromUG`)
+- Searches `ultimate-guitar.com/search.php?type=300` (300 = Chords only)
+- Page data is in `<div class="js-store" data-content="...">` as JSON — parse `store.page.data.results`
+- Picks the highest `rating × log(1 + votes)` chord tab
+- Tab content is in `store.page.data.tab_view.wiki_tab.content`; UG format uses `[ch]G[/ch]` → rewritten to `[G]` before passing to `parseChordPro`
+- Cloudflare may block — if `js-store` is missing, returns `null` and the next source is tried
 
-`song.tsx` serves double duty: when navigated to without `title`/`artist` params it renders `SongHistoryList`; with params it fetches and displays the chord chart.
+### Cifra Club (`fetchChartFromCifra`)
+- Direct URL: `cifraclub.com.br/<artist-slug>/<song-slug>/`; falls back to site search
+- Chart is in `<pre class="cifra_chord">` with `<b>` tags wrapping chord names
+- Portuguese section headers (`Refrão`, `Estrofe`, `Ponte`) are translated to English equivalents
+- Key extracted from `"Tom: <key>"` in body text; capo from `"Capotraste na Xª casa"`
 
-### Key components and libraries
-- `components/LineView.tsx` — chord row + lyric row renderer. Uses a fixed monospace `CHAR_W` (7.8px iOS / 7.7px Android) so chord pixel positions align with lyric characters. Both rows must use `MONO` (`Courier New` on iOS) at `FSIZE` (13px) or alignment breaks.
-- `components/ChordDiagram.tsx` — tappable chord name → fingering diagram modal
-- `lib/chordDiagrams.ts` — static fingering data for known chord names
-- `lib/freeGate.ts` — freemium gate: one free action per device, then auth wall (`shouldShowGate` / `consumeFreeAction` / `clearGate`)
-- `lib/songHistory.ts` — AsyncStorage-backed recently-viewed song list
-- `lib/supabase.ts` — Supabase client (auth + chord chart reads/writes)
-- `context/auth.tsx` — `AuthProvider` + `useAuth` hook; wraps the whole app in `_layout.tsx`
+### e-chords (`fetchChartFromEchords`)
+- Direct URL only: `e-chords.com/chords/<artist-slug>/<song-slug>`
+- Chart in `<pre id="core">` with `<u>` tags wrapping chord names
+- Key extracted from `"Tone: <key>"` in body text
 
-### Design tokens (apply consistently, do not introduce new colours)
-```
-BG       #0e0c09   — page background
-CREAM    #e8dfc8   — primary text
-GOLD     #c9a84c   — accent / interactive elements
-GOLD_DIM #8a6f32   — secondary accent
-MUTED    #6b6254   — secondary text
-BORDER   #2a2318   — borders
-RED      #c0392b   — destructive / error
-```
+All scrapers use `slugify()` to build URL slugs (strips accents, lowercases, replaces special chars with hyphens) and `normalizeForLookup()` to strip parenthetical suffixes before slugifying.
 
-### Data model: chord chart
-```ts
-type ChordChart = {
-  title:       string;
-  artist:      string;
-  musicalKey?: string;       // e.g. "D major", "F# minor"
-  tempo?:      number;
-  capo?:       number;       // 0 = no capo
-  sections:    Section[];
-  verified?:   boolean;      // true = user-corrected, never overwrite with AI
-  source?:     'ultimate_guitar' | 'cifraclub' | 'echords' | 'ai_generated' | 'user_corrected';
-};
+`fetchHtml()` is a shared helper that uses a real-browser `User-Agent` header and a short 8 s timeout. Non-2xx below 500 returns `null`; 5xx throws.
 
-type Section = { label: string; lines: Line[] };
-type Line    = { lyrics: string; chords: { chord: string; position: number }[] };
-```
+## AI generation (`generateChartWithAI`)
 
-Supabase table is `chord_charts` with a unique constraint on `(title, artist)`. Upsert uses `onConflict: 'title,artist'`.
+Two modes depending on whether verified lyrics were found:
+
+**Mode A — lyrics in hand**: system prompt instructs GPT-4o to copy lyrics word-for-word and place chords inline. The model's only creative job is chord placement.
+
+**Mode B — full recall**: system prompt asks GPT-4o to recall both lyrics and chords from training data.
+
+Both modes enforce:
+- **Key constraint**: if Spotify confirmed a key, the prompt states it and requires every chord to be diatonic (or a recognised borrowed chord)
+- **Enharmonic constraint**: flat-key songs get "use flats only" instruction; sharp-key songs get "use sharps only" — prevents `Db` vs `C#` mixing within a chart
+- `temperature: 0.1`, `max_tokens: 4096`, model `gpt-4o`
+
+The model's raw output is stripped of markdown fences then passed to `parseChordPro`. If parsing yields 0 sections the whole request fails with an error (no silent empty chart).
+
+## Supabase schema
+
+Table `chord_charts`:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `title` | text | unique with `artist` |
+| `artist` | text | |
+| `musical_key` | text | e.g. `"D major"` |
+| `tempo` | int | BPM |
+| `capo` | int | 0 = no capo |
+| `sections` | jsonb | array of `{ label, lines[] }` |
+| `source` | text | `ultimate_guitar` / `cifraclub` / `echords` / `ai_generated` / `user_corrected` |
+| `verified` | bool | `true` = user-corrected, never overwrite with AI |
+| `play_count` | int | incremented on every cache hit |
+
+Upsert uses `onConflict: 'title,artist'`. Verified charts are protected — `PUT /chords` always sets `verified: true`; `POST /chords` with `force:true` will overwrite even verified rows (intentional: lets the owner regenerate a bad AI chart).
+
+Table `user_songs` — owned by the mobile app's `lib/songHistory.ts`, not touched by the backend.
+
+## Key utility functions
+
+| Function | Purpose |
+|----------|---------|
+| `normalizeForLookup(s)` | Strips `(Remastered)`, `[Live]`, `feat.`, `& The Band` etc. before URL/search use |
+| `slugify(s)` | URL slug: strip accents, lowercase, replace non-alphanumeric with `-` |
+| `parseChordPro(text)` | ChordPro inline → `Section[]` |
+| `validateAndRepairChart(chart)` | Clamp positions, sort chords, drop empties, coerce types |
+| `fetchChartFromSources(title, artist, releaseDate)` | Orchestrates the UG → Cifra → e-chords → AI cascade |
+| `fetchRealLyrics(title, artist)` | lrclib /get → lrclib /search → lyrics.ovh cascade |
+| `lookupSpotifyKey(title, artist)` | Returns `{ spotifyKey, spotifyTempo }` via Spotify audio-analysis |
