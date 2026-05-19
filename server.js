@@ -6,6 +6,9 @@ const FormData = require("form-data");
 const OpenAI = require("openai");
 const cheerio = require("cheerio");
 const { createClient } = require("@supabase/supabase-js");
+const fs   = require("fs");
+const path = require("path");
+const os   = require("os");
 
 const app = express();
 const port = 3000;
@@ -971,6 +974,36 @@ app.put("/chords", async function(req, res) {
   } catch(e) {
     console.error("PUT /chords error:", e.message);
     return res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /transcribe { audioBase64, mimeType? } — Whisper transcription, any language
+app.post("/transcribe", async function(req, res) {
+  var audioBase64 = req.body.audioBase64;
+  var mimeType    = req.body.mimeType || "audio/m4a";
+  if (!audioBase64) return res.status(400).json({ error: "No audio provided" });
+
+  var ext      = (mimeType.includes("mp4") || mimeType.includes("m4a")) ? "m4a" : "wav";
+  var tempPath = path.join(os.tmpdir(), "transcribe_" + Date.now() + "." + ext);
+
+  try {
+    var audioBuffer = Buffer.from(audioBase64, "base64");
+    fs.writeFileSync(tempPath, audioBuffer);
+    console.log("Whisper: transcribing " + (audioBuffer.length / 1024).toFixed(0) + " KB");
+
+    var response = await openai.audio.transcriptions.create({
+      file:            fs.createReadStream(tempPath),
+      model:           "whisper-1",
+      response_format: "verbose_json",
+    });
+
+    console.log("Whisper: language=" + response.language + " chars=" + (response.text || "").length);
+    res.json({ transcript: response.text, language: response.language });
+  } catch(e) {
+    console.error("Transcribe error:", e.message);
+    res.status(500).json({ error: e.message });
+  } finally {
+    try { fs.unlinkSync(tempPath); } catch(_) {}
   }
 });
 

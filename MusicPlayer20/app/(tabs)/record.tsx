@@ -43,9 +43,10 @@ type ChordChart = {
   capo?:       number | string;
 };
 type IdentifyResult = { identified: boolean; songInfo?: SongInfo; chart: ChordChart };
-type StatusKey = 'idle' | 'listening' | 'processing' | 'identifying'
-               | 'identified' | 'generated' | 'error' | 'saved';
+type StatusKey = 'idle' | 'listening' | 'processing' | 'identifying' | 'transcribing'
+               | 'identified' | 'generated' | 'error' | 'saved' | 'transcribed';
 type RecordMode = 'identify' | 'live';
+type TranscriptResult = { text: string; language: string };
 
 function artworkUrl(songInfo?: SongInfo): string {
   const am = songInfo?.apple_music?.artwork?.url;
@@ -109,13 +110,14 @@ const pill = StyleSheet.create({
 export default function RecordScreen() {
   const router        = useRouter();
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
-  const [isRecording, setIsRecording]   = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [statusKey, setStatusKey]       = useState<StatusKey>('idle');
-  const [errorMsg, setErrorMsg]         = useState('');
-  const [result, setResult]             = useState<IdentifyResult | null>(null);
-  const [mode, setMode]                 = useState<RecordMode>('identify');
-  const [gateVisible, setGateVisible]   = useState(false);
+  const [isRecording, setIsRecording]         = useState(false);
+  const [isProcessing, setIsProcessing]       = useState(false);
+  const [statusKey, setStatusKey]             = useState<StatusKey>('idle');
+  const [errorMsg, setErrorMsg]               = useState('');
+  const [result, setResult]                   = useState<IdentifyResult | null>(null);
+  const [transcriptResult, setTranscriptResult] = useState<TranscriptResult | null>(null);
+  const [mode, setMode]                       = useState<RecordMode>('identify');
+  const [gateVisible, setGateVisible]         = useState(false);
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const pulseRef  = useRef<Animated.CompositeAnimation | null>(null);
@@ -137,15 +139,15 @@ export default function RecordScreen() {
     }
   }, [isRecording]);
 
-  // Fade-in chart when it arrives
+  // Fade-in chart or transcript when it arrives
   useEffect(() => {
-    if (result?.chart) {
+    if (result?.chart || transcriptResult) {
       fadeAnim.setValue(0);
       Animated.timing(fadeAnim, {
         toValue: 1, duration: 600, delay: 80, useNativeDriver: true,
       }).start();
     }
-  }, [result]);
+  }, [result, transcriptResult]);
 
   async function startRecording() {
     if (await shouldShowGate()) { setGateVisible(true); return; }
@@ -173,9 +175,21 @@ export default function RecordScreen() {
       setIsProcessing(true);
       setStatusKey('processing');
       await audioRecorder.stop();
-      await consumeFreeAction();
+      const uri = audioRecorder.uri;
+      if (!uri) { setStatusKey('error'); setErrorMsg('No audio recorded'); setIsProcessing(false); return; }
+      setStatusKey('transcribing');
+      const base64Audio = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
+      const response = await fetch('https://music-player-production-524a.up.railway.app/transcribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audioBase64: base64Audio, mimeType: 'audio/m4a' }),
+      });
+      const data = await response.json();
       setIsProcessing(false);
-      setStatusKey('saved');
+      if (data.error) { setStatusKey('error'); setErrorMsg(data.error); return; }
+      await consumeFreeAction();
+      setTranscriptResult({ text: data.transcript, language: data.language });
+      setStatusKey('transcribed');
     } catch (e: any) {
       setIsProcessing(false);
       setStatusKey('error');
@@ -252,7 +266,7 @@ export default function RecordScreen() {
         showsVerticalScrollIndicator={false}
       >
         {/* Idle header — changes based on mode */}
-        {!chart && statusKey !== 'saved' && (
+        {!chart && statusKey !== 'saved' && statusKey !== 'transcribed' && (
           <View style={s.idleHeader}>
             {mode === 'identify' ? (
               <>
@@ -264,25 +278,30 @@ export default function RecordScreen() {
               <>
                 <Text style={s.idleMain}>Record</Text>
                 <Text style={s.idleAccent}>Live.</Text>
-                <Text style={s.idleTagline}>Capture your performance to share in Lessons</Text>
+                <Text style={s.idleTagline}>Sing or play — lyrics transcribed in any language</Text>
               </>
             )}
           </View>
         )}
 
-        {/* Live recording saved confirmation */}
-        {statusKey === 'saved' && (
-          <View style={s.savedState}>
-            <Text style={s.savedSymbol}>✦</Text>
-            <Text style={s.savedTitle}>Recording saved!</Text>
-            <Text style={s.savedSub}>Your recording is ready to upload to the Community Videos section in Lessons.</Text>
-            <TouchableOpacity style={s.uploadBtn} activeOpacity={0.8} onPress={() => setStatusKey('idle')}>
-              <Text style={s.uploadBtnTxt}>UPLOAD TO LESSONS</Text>
+        {/* Live transcription result */}
+        {statusKey === 'transcribed' && transcriptResult && (
+          <Animated.View style={{ opacity: fadeAnim, transform: [{ translateY: slideY }] }}>
+            <Text style={s.sourceBadge}>✦  TRANSCRIBED</Text>
+            <View style={s.transcriptLangRow}>
+              <Pill label="LANGUAGE" value={(transcriptResult.language || 'unknown').toUpperCase()} />
+            </View>
+            <View style={s.transcriptBox}>
+              <Text style={s.transcriptText}>{transcriptResult.text}</Text>
+            </View>
+            <TouchableOpacity
+              style={s.recordAgainBtn}
+              onPress={() => { setTranscriptResult(null); setStatusKey('idle'); }}
+              activeOpacity={0.7}
+            >
+              <Text style={s.recordAgainTxt}>Record again</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => setStatusKey('idle')}>
-              <Text style={s.discardTxt}>Discard</Text>
-            </TouchableOpacity>
-          </View>
+          </Animated.View>
         )}
 
         {/* ── Identified result card ──────────────────────────────── */}
@@ -331,18 +350,18 @@ export default function RecordScreen() {
       <View style={s.bottomBar}>
 
         {/* Mode toggle */}
-        {!isRecording && !isProcessing && statusKey !== 'saved' && !chart && (
+        {!isRecording && !isProcessing && statusKey !== 'saved' && statusKey !== 'transcribed' && !chart && (
           <View style={s.modeToggle}>
             <TouchableOpacity
               style={[s.modeBtn, mode === 'identify' && s.modeBtnActive]}
-              onPress={() => { setMode('identify'); setStatusKey('idle'); setResult(null); }}
+              onPress={() => { setMode('identify'); setStatusKey('idle'); setResult(null); setTranscriptResult(null); }}
               activeOpacity={0.8}
             >
               <Text style={[s.modeTxt, mode === 'identify' && s.modeTxtActive]}>IDENTIFY</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[s.modeBtn, mode === 'live' && s.modeBtnLive]}
-              onPress={() => { setMode('live'); setStatusKey('idle'); setResult(null); }}
+              onPress={() => { setMode('live'); setStatusKey('idle'); setResult(null); setTranscriptResult(null); }}
               activeOpacity={0.8}
             >
               <Text style={[s.modeTxt, mode === 'live' && s.modeTxtLive]}>● RECORD LIVE</Text>
@@ -358,16 +377,17 @@ export default function RecordScreen() {
               <AnimatedDots active={isRecording} />
             </Text>
           )}
-          {statusKey === 'processing'  && <Text style={s.statusMuted}>Processing...</Text>}
-          {statusKey === 'identifying' && <Text style={s.statusMuted}>Identifying song...</Text>}
+          {statusKey === 'processing'   && <Text style={s.statusMuted}>Processing...</Text>}
+          {statusKey === 'transcribing' && <Text style={s.statusMuted}>Transcribing...</Text>}
+          {statusKey === 'identifying'  && <Text style={s.statusMuted}>Identifying song...</Text>}
           {statusKey === 'identified'  && <Text style={s.statusGold}>Song identified!</Text>}
           {statusKey === 'generated'   && <Text style={s.statusMuted}>Chart generated</Text>}
           {statusKey === 'error'       && <Text style={s.statusError}>{errorMsg}</Text>}
           {isRecording && <Text style={s.hintText}>tap to stop</Text>}
         </View>
 
-        {/* Record button — hidden on saved screen and result card */}
-        {statusKey !== 'saved' && !chart && (
+        {/* Record button — hidden on transcript and result card */}
+        {statusKey !== 'saved' && statusKey !== 'transcribed' && !chart && (
           <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
             <TouchableOpacity
               style={[s.recordBtn, isRecording && s.recordBtnActive]}
@@ -503,14 +523,20 @@ const s = StyleSheet.create({
   modeTxtActive: { color: BG },
   modeTxtLive:   { color: '#fff' },
 
-  // ── Live saved state ──────────────────────────────────────────────────────
-  savedState:  { flex: 1, alignItems: 'center', paddingTop: 32 },
-  savedSymbol: { color: GOLD, fontSize: 32, marginBottom: 16 },
-  savedTitle:  { color: CREAM, fontSize: 22, fontWeight: '700', marginBottom: 10 },
-  savedSub:    { color: MUTED, fontSize: 13, textAlign: 'center', lineHeight: 20, marginBottom: 32, paddingHorizontal: 16 },
-  uploadBtn:   { backgroundColor: GOLD, paddingVertical: 14, paddingHorizontal: 32, marginBottom: 16 },
-  uploadBtnTxt:{ color: BG, fontSize: 11, fontWeight: '700', letterSpacing: 2.5 },
-  discardTxt:  { color: MUTED, fontSize: 12 },
+  // ── Live transcript result ────────────────────────────────────────────────
+  transcriptLangRow: { flexDirection: 'row', marginBottom: 16 },
+  transcriptBox: {
+    backgroundColor: '#16130e',
+    borderWidth:     1,
+    borderColor:     BORDER,
+    padding:         20,
+    marginBottom:    24,
+  },
+  transcriptText: {
+    color:      CREAM,
+    fontSize:   16,
+    lineHeight: 28,
+  },
 
   // ── Record button ─────────────────────────────────────────────────────────
   recordBtn: {
