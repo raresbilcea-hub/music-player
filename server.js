@@ -18,6 +18,54 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
+// Tell Express to honour Railway's X-Forwarded-For so req.ip is the real client IP
+app.set("trust proxy", true);
+
+// ─── Rate limiting ────────────────────────────────────────────────────────────
+// Simple in-memory daily counter per IP per route. Protects the OpenAI / AudD
+// / Whisper budgets from being drained by a single client. Resets at server
+// restart (Railway naturally restarts on deploy) or after 24h of inactivity.
+//
+// This is intentionally a tiny, dependency-free implementation. If/when we
+// horizontally scale, swap this for a Redis-backed limiter.
+
+var rateLimitState = Object.create(null);  // { "ip|route": { count, resetAt } }
+var DAY_MS = 24 * 60 * 60 * 1000;
+
+function rateLimit(route, max) {
+  return function (req, res, next) {
+    var ip = req.ip || req.headers["x-forwarded-for"] || "unknown";
+    // x-forwarded-for can be a comma-separated chain — take the first
+    if (typeof ip === "string" && ip.indexOf(",") !== -1) ip = ip.split(",")[0].trim();
+    var key = ip + "|" + route;
+    var now = Date.now();
+    var entry = rateLimitState[key];
+    if (!entry || entry.resetAt < now) {
+      entry = { count: 0, resetAt: now + DAY_MS };
+      rateLimitState[key] = entry;
+    }
+    entry.count += 1;
+    if (entry.count > max) {
+      var hoursLeft = Math.ceil((entry.resetAt - now) / (60 * 60 * 1000));
+      console.log("RateLimit: " + ip + " hit " + route + " " + entry.count + "x (limit " + max + ")");
+      return res.status(429).json({
+        error: "Daily limit reached for this endpoint. Try again in ~" + hoursLeft + " hour(s).",
+        retryAfterHours: hoursLeft,
+      });
+    }
+    next();
+  };
+}
+
+// Periodic cleanup: prune entries whose window has fully expired so the map
+// doesn't grow forever for one-shot visitors.
+setInterval(function () {
+  var now = Date.now();
+  for (var key in rateLimitState) {
+    if (rateLimitState[key].resetAt < now) delete rateLimitState[key];
+  }
+}, 60 * 60 * 1000);  // every hour
+
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
 async function fetchChartFromDB(title, artist) {
@@ -865,7 +913,7 @@ app.get("/chords", async function(req, res) {
 // POST /chords { title, artist, force? } — generate + save
 //   force: true → bypass cache + overwrite any existing row.
 //   Used by the "Regenerate" button in the app for songs with wrong chords.
-app.post("/chords", async function(req, res) {
+app.post("/chords", rateLimit("chords", 50), async function(req, res) {
   var title = req.body.title, artist = req.body.artist;
   var force = req.body.force === true;
   if (!title || !artist) return res.status(400).json({ error: "title and artist required" });
@@ -892,7 +940,7 @@ app.post("/chords", async function(req, res) {
   }
 });
 
-app.post("/identify", async function(req, res) {
+app.post("/identify", rateLimit("identify", 50), async function(req, res) {
   try {
     var audioBase64 = req.body.audioBase64;
     var mimeType = req.body.mimeType;
@@ -978,7 +1026,7 @@ app.put("/chords", async function(req, res) {
 });
 
 // POST /transcribe { audioBase64, mimeType? } — Whisper transcription, any language
-app.post("/transcribe", async function(req, res) {
+app.post("/transcribe", rateLimit("transcribe", 50), async function(req, res) {
   var audioBase64 = req.body.audioBase64;
   var mimeType    = req.body.mimeType || "audio/m4a";
   if (!audioBase64) return res.status(400).json({ error: "No audio provided" });

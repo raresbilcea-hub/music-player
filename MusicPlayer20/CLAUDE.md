@@ -15,6 +15,16 @@ npm run lint            # ESLint via expo lint
 
 No test suite exists yet.
 
+## Deployment
+
+App identifiers are set in `app.json`:
+- iOS: `ios.bundleIdentifier = "com.raresbilcea.musicplayer20"`
+- Android: `android.package = "com.raresbilcea.musicplayer20"`
+
+EAS build profiles live in `eas.json` (`development` / `preview` / `production`). The `preview` profile builds an internal-distribution IPA suitable for TestFlight. Step-by-step commands for the first build + TestFlight upload are in `DEPLOY.md` at the project root.
+
+Microphone usage strings for App Store review are in `app.json` (`ios.infoPlist.NSMicrophoneUsageDescription` and `plugins.expo-audio.microphonePermission`).
+
 ## Environment
 
 Copy `.env.example` → `.env`:
@@ -38,13 +48,19 @@ app/
   _layout.tsx          — root Stack; wraps everything in AuthProvider
                          redirects away from login/register if already signed in
                          never forces login — auth is opt-in via the free gate
+                         registers record-lesson as a modal screen
   (tabs)/
     _layout.tsx        — bottom tab bar (Home / Lessons / Songs / Record)
                          AuthHeaderButton in header shows username + sign-out or sign-in link
     index.tsx          — Home: iTunes search + recently viewed horizontal carousel
     song.tsx           — dual-purpose: history list (no params) or chord chart viewer/editor (with params)
-    record.tsx         — audio identification (AudD) + live recording stub
-    explore.tsx        — Lessons tab; all data is mock, no backend yet
+    record.tsx         — song identification (AudD) only. 10-second auto-stop.
+                         Reserved for future live-chord-detection (Step 2/3 of roadmap).
+    explore.tsx        — Lessons tab: honest "Coming soon" placeholders for Community
+                         videos / Lessons / Teachers. Entry point to record-lesson.
+  record-lesson.tsx    — Modal screen accessed from Lessons. Records audio, sends to
+                         /transcribe (Whisper), saves transcript locally. Cloud
+                         community upload deferred (clear "Coming soon" alert).
   login.tsx            — email/password sign-in
   register.tsx         — email/password sign-up
   profile.tsx          — presented as a modal
@@ -77,18 +93,19 @@ Edit mode (`editing: true`) replaces `LineView` with `EditLineView` (chord pills
 
 ### `app/(tabs)/record.tsx`
 
-Two modes toggled by the user:
-
-| Mode | Behaviour |
-|------|-----------|
-| `identify` | Records for 10 s automatically, then POSTs base64 audio to `/identify` |
-| `live` | Records until user taps stop, saves locally (upload to Lessons is a stub) |
+Song identification only. Records 10 s of audio, POSTs base64 to `/identify`, AudD fingerprints it, returns a chord chart. The previous `live` mode (Whisper transcription) has been moved to `app/record-lesson.tsx` (accessed via Lessons tab). The Record tab is intentionally minimal so it can be replaced by live-chord-detection from microphone audio in a future release.
 
 Uses `expo-audio` (`useAudioRecorder`, `RecordingPresets.HIGH_QUALITY`) and `expo-file-system/legacy` (`readAsStringAsync` with `encoding: 'base64'`). The record button pulses via `Animated.loop` while recording.
 
+### `app/record-lesson.tsx`
+
+Modal-presentation route reached from Lessons tab's "Start recording" card. Records audio of arbitrary length (user taps to stop), sends to `/transcribe` (Whisper), shows the resulting text. Two actions on the result:
+- **Save on this device** — writes the transcript + metadata to AsyncStorage key `@mp_local_lessons` (capped at 50 entries). Closes the modal.
+- **Upload to community (coming soon)** — shows an honest "feature not built yet" alert.
+
 ### `app/(tabs)/explore.tsx`
 
-Lessons tab — fully mock data (no backend). Videos, lessons, and teacher cards are hardcoded arrays. Replace with real API calls when the backend is ready.
+Lessons tab. Three honest "Coming soon" placeholder cards (Community videos, Lessons, Teachers), plus a real "Start recording" card that opens `record-lesson`. All previous mock data (fake teacher names, hardcoded prices) was removed.
 
 ## Components
 

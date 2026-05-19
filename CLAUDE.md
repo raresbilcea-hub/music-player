@@ -23,13 +23,20 @@ No build step, no test suite. All logic is in the single file `server.js`.
 
 ## Routes
 
-| Method | Route | Purpose |
-|--------|-------|---------|
-| GET | `/search?q=` | Proxy to iTunes search, returns `{ count, songs[] }` |
-| GET | `/chords?title=&artist=` | Supabase cache lookup only — fast, no generation |
-| POST | `/chords` `{ title, artist, force? }` | Generate & cache; `force:true` bypasses cache and overwrites |
-| PUT | `/chords` `{ title, artist, sections, musicalKey, tempo, capo }` | Save user correction, marks `verified:true` |
-| POST | `/identify` `{ audioBase64, mimeType }` | AudD fingerprint → chord chart |
+| Method | Route | Purpose | Rate limit |
+|--------|-------|---------|------------|
+| GET | `/search?q=` | Proxy to iTunes search, returns `{ count, songs[] }` | — |
+| GET | `/chords?title=&artist=` | Supabase cache lookup only — fast, no generation | — |
+| POST | `/chords` `{ title, artist, force? }` | Generate & cache; `force:true` bypasses cache and overwrites | 50/day/IP |
+| PUT | `/chords` `{ title, artist, sections, musicalKey, tempo, capo }` | Save user correction, marks `verified:true` | — |
+| POST | `/identify` `{ audioBase64, mimeType }` | AudD fingerprint → chord chart | 50/day/IP |
+| POST | `/transcribe` `{ audioBase64, mimeType }` | Whisper transcription (any language) → `{ transcript, language }` | 50/day/IP |
+
+## Rate limiting
+
+`rateLimit(route, max)` middleware is a tiny in-memory daily counter per IP per route, protecting the OpenAI / AudD / Whisper budgets from a runaway client. Returns HTTP 429 with a readable retry-in-N-hours message when exceeded. State resets on server restart (deploys naturally restart Railway). Swap for Redis if/when we scale horizontally.
+
+`app.set("trust proxy", true)` is set so `req.ip` reads the real client from Railway's `X-Forwarded-For`.
 
 ## Chord chart pipeline
 

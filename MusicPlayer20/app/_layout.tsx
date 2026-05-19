@@ -30,6 +30,15 @@ function RootLayoutNav() {
         <Stack.Screen name="register" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
         <Stack.Screen
+          name="record-lesson"
+          options={{
+            presentation:    'modal',
+            headerShown:     false,
+            animation:       'slide_from_bottom',
+            contentStyle:    { backgroundColor: '#0e0c09' },
+          }}
+        />
+        <Stack.Screen
           name="profile"
           options={{
             title: 'Profile',

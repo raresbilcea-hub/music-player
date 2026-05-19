@@ -43,17 +43,13 @@ type ChordChart = {
   capo?:       number | string;
 };
 type IdentifyResult = { identified: boolean; songInfo?: SongInfo; chart: ChordChart };
-type StatusKey = 'idle' | 'listening' | 'processing' | 'identifying' | 'transcribing'
-               | 'identified' | 'generated' | 'error' | 'saved' | 'transcribed';
-type RecordMode = 'identify' | 'live';
-type TranscriptResult = { text: string; language: string };
+type StatusKey = 'idle' | 'listening' | 'processing' | 'identifying' | 'identified' | 'generated' | 'error';
 
 function artworkUrl(songInfo?: SongInfo): string {
   const am = songInfo?.apple_music?.artwork?.url;
   if (am) return am.replace('{w}', '300').replace('{h}', '300');
   return songInfo?.spotify?.album?.images?.[0]?.url ?? '';
 }
-
 
 // ─── AnimatedDots ─────────────────────────────────────────────────────────────
 
@@ -82,42 +78,27 @@ function Pill({ label, value }: { label: string; value: string }) {
 }
 
 const pill = StyleSheet.create({
-  wrap: {
-    backgroundColor: '#191610',
-    borderWidth: 1,
-    borderColor: '#2e2618',
-    borderRadius: 4,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    alignItems: 'center',
-    minWidth: 64,
-  },
-  label: {
-    color: GOLD_DIM,
-    fontSize: 8,
-    letterSpacing: 2,
-    marginBottom: 4,
-  },
-  value: {
-    color: CREAM,
-    fontSize: 14,
-    fontWeight: '600',
-  },
+  wrap:  { backgroundColor: '#191610', borderWidth: 1, borderColor: '#2e2618', borderRadius: 4, paddingHorizontal: 14, paddingVertical: 8, alignItems: 'center', minWidth: 64 },
+  label: { color: GOLD_DIM, fontSize: 8, letterSpacing: 2, marginBottom: 4 },
+  value: { color: CREAM, fontSize: 14, fontWeight: '600' },
 });
 
 // ─── RecordScreen ─────────────────────────────────────────────────────────────
+// Record tab is now reserved for song identification (AudD).
+// The previous "Record live" mode that did Whisper transcription has been
+// moved to the Lessons tab as "Record a lesson" — see app/record-lesson.tsx.
+// The Record tab will host live-chord-detection from microphone audio in a
+// future release (Step 2/3 of the product roadmap).
 
 export default function RecordScreen() {
   const router        = useRouter();
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
-  const [isRecording, setIsRecording]         = useState(false);
-  const [isProcessing, setIsProcessing]       = useState(false);
-  const [statusKey, setStatusKey]             = useState<StatusKey>('idle');
-  const [errorMsg, setErrorMsg]               = useState('');
-  const [result, setResult]                   = useState<IdentifyResult | null>(null);
-  const [transcriptResult, setTranscriptResult] = useState<TranscriptResult | null>(null);
-  const [mode, setMode]                       = useState<RecordMode>('identify');
-  const [gateVisible, setGateVisible]         = useState(false);
+  const [isRecording, setIsRecording]   = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [statusKey, setStatusKey]       = useState<StatusKey>('idle');
+  const [errorMsg, setErrorMsg]         = useState('');
+  const [result, setResult]             = useState<IdentifyResult | null>(null);
+  const [gateVisible, setGateVisible]   = useState(false);
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const pulseRef  = useRef<Animated.CompositeAnimation | null>(null);
@@ -139,15 +120,13 @@ export default function RecordScreen() {
     }
   }, [isRecording]);
 
-  // Fade-in chart or transcript when it arrives
+  // Fade-in chart when it arrives
   useEffect(() => {
-    if (result?.chart || transcriptResult) {
+    if (result?.chart) {
       fadeAnim.setValue(0);
-      Animated.timing(fadeAnim, {
-        toValue: 1, duration: 600, delay: 80, useNativeDriver: true,
-      }).start();
+      Animated.timing(fadeAnim, { toValue: 1, duration: 600, delay: 80, useNativeDriver: true }).start();
     }
-  }, [result, transcriptResult]);
+  }, [result]);
 
   async function startRecording() {
     if (await shouldShowGate()) { setGateVisible(true); return; }
@@ -160,40 +139,12 @@ export default function RecordScreen() {
       setStatusKey('listening');
       await audioRecorder.prepareToRecordAsync();
       await audioRecorder.record();
-      // In live mode record until the user stops manually — no auto-stop
-      if (mode === 'identify') setTimeout(() => stopAndIdentify(), 10000);
+      // Auto-stop after 10s — AudD only needs a short clip to fingerprint
+      setTimeout(() => stopAndIdentify(), 10000);
     } catch (e: any) {
       setStatusKey('error');
       setErrorMsg(e.message);
       setIsRecording(false);
-    }
-  }
-
-  async function stopAndSaveLive() {
-    try {
-      setIsRecording(false);
-      setIsProcessing(true);
-      setStatusKey('processing');
-      await audioRecorder.stop();
-      const uri = audioRecorder.uri;
-      if (!uri) { setStatusKey('error'); setErrorMsg('No audio recorded'); setIsProcessing(false); return; }
-      setStatusKey('transcribing');
-      const base64Audio = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
-      const response = await fetch('https://music-player-production-524a.up.railway.app/transcribe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ audioBase64: base64Audio, mimeType: 'audio/m4a' }),
-      });
-      const data = await response.json();
-      setIsProcessing(false);
-      if (data.error) { setStatusKey('error'); setErrorMsg(data.error); return; }
-      await consumeFreeAction();
-      setTranscriptResult({ text: data.transcript, language: data.language });
-      setStatusKey('transcribed');
-    } catch (e: any) {
-      setIsProcessing(false);
-      setStatusKey('error');
-      setErrorMsg(e.message);
     }
   }
 
@@ -208,9 +159,9 @@ export default function RecordScreen() {
       setStatusKey('identifying');
       const base64Audio = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
       const response = await fetch('https://music-player-production-524a.up.railway.app/identify', {
-        method: 'POST',
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ audioBase64: base64Audio, mimeType: 'audio/m4a' }),
+        body:    JSON.stringify({ audioBase64: base64Audio, mimeType: 'audio/m4a' }),
       });
       const data = await response.json();
       setIsProcessing(false);
@@ -248,7 +199,7 @@ export default function RecordScreen() {
       params: {
         title:   chart.title,
         artist:  chart.artist,
-        album:   songInfo?.album   ?? '',
+        album:   songInfo?.album ?? '',
         year:    songInfo?.release_date ? songInfo.release_date.substring(0, 4) : '',
         artwork: artwork,
       },
@@ -259,52 +210,21 @@ export default function RecordScreen() {
     <View style={s.root}>
       <FreeGateModal visible={gateVisible} />
 
-      {/* ── Scrollable area ─────────────────────────────────────────────── */}
       <ScrollView
         style={s.scroll}
         contentContainerStyle={s.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {/* Idle header — changes based on mode */}
-        {!chart && statusKey !== 'saved' && statusKey !== 'transcribed' && (
+        {/* Idle header */}
+        {!chart && (
           <View style={s.idleHeader}>
-            {mode === 'identify' ? (
-              <>
-                <Text style={s.idleMain}>Identify</Text>
-                <Text style={s.idleAccent}>a Song.</Text>
-                <Text style={s.idleTagline}>Hold your device near the music</Text>
-              </>
-            ) : (
-              <>
-                <Text style={s.idleMain}>Record</Text>
-                <Text style={s.idleAccent}>Live.</Text>
-                <Text style={s.idleTagline}>Sing or play — lyrics transcribed in any language</Text>
-              </>
-            )}
+            <Text style={s.idleMain}>Identify</Text>
+            <Text style={s.idleAccent}>a Song.</Text>
+            <Text style={s.idleTagline}>Hold your device near the music for ten seconds</Text>
           </View>
         )}
 
-        {/* Live transcription result */}
-        {statusKey === 'transcribed' && transcriptResult && (
-          <Animated.View style={{ opacity: fadeAnim, transform: [{ translateY: slideY }] }}>
-            <Text style={s.sourceBadge}>✦  TRANSCRIBED</Text>
-            <View style={s.transcriptLangRow}>
-              <Pill label="LANGUAGE" value={(transcriptResult.language || 'unknown').toUpperCase()} />
-            </View>
-            <View style={s.transcriptBox}>
-              <Text style={s.transcriptText}>{transcriptResult.text}</Text>
-            </View>
-            <TouchableOpacity
-              style={s.recordAgainBtn}
-              onPress={() => { setTranscriptResult(null); setStatusKey('idle'); }}
-              activeOpacity={0.7}
-            >
-              <Text style={s.recordAgainTxt}>Record again</Text>
-            </TouchableOpacity>
-          </Animated.View>
-        )}
-
-        {/* ── Identified result card ──────────────────────────────── */}
+        {/* Identified result card */}
         {chart && (
           <Animated.View style={{ opacity: fadeAnim, transform: [{ translateY: slideY }] }}>
             <Text style={s.sourceBadge}>
@@ -346,54 +266,24 @@ export default function RecordScreen() {
         <View style={{ height: 180 }} />
       </ScrollView>
 
-      {/* ── Fixed bottom bar ────────────────────────────────────────────── */}
+      {/* Fixed bottom bar */}
       <View style={s.bottomBar}>
-
-        {/* Mode toggle */}
-        {!isRecording && !isProcessing && statusKey !== 'saved' && statusKey !== 'transcribed' && !chart && (
-          <View style={s.modeToggle}>
-            <TouchableOpacity
-              style={[s.modeBtn, mode === 'identify' && s.modeBtnActive]}
-              onPress={() => { setMode('identify'); setStatusKey('idle'); setResult(null); setTranscriptResult(null); }}
-              activeOpacity={0.8}
-            >
-              <Text style={[s.modeTxt, mode === 'identify' && s.modeTxtActive]}>IDENTIFY</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[s.modeBtn, mode === 'live' && s.modeBtnLive]}
-              onPress={() => { setMode('live'); setStatusKey('idle'); setResult(null); setTranscriptResult(null); }}
-              activeOpacity={0.8}
-            >
-              <Text style={[s.modeTxt, mode === 'live' && s.modeTxtLive]}>● RECORD LIVE</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-
-        {/* Status */}
         <View style={s.statusRow}>
-          {statusKey === 'listening' && (
-            <Text style={mode === 'live' ? s.statusRed : s.statusListening}>
-              {mode === 'live' ? '● Recording live' : 'Listening'}
-              <AnimatedDots active={isRecording} />
-            </Text>
-          )}
-          {statusKey === 'processing'   && <Text style={s.statusMuted}>Processing...</Text>}
-          {statusKey === 'transcribing' && <Text style={s.statusMuted}>Transcribing...</Text>}
-          {statusKey === 'identifying'  && <Text style={s.statusMuted}>Identifying song...</Text>}
+          {statusKey === 'listening'   && <Text style={s.statusListening}>Listening<AnimatedDots active={isRecording} /></Text>}
+          {statusKey === 'processing'  && <Text style={s.statusMuted}>Processing...</Text>}
+          {statusKey === 'identifying' && <Text style={s.statusMuted}>Identifying song...</Text>}
           {statusKey === 'identified'  && <Text style={s.statusGold}>Song identified!</Text>}
           {statusKey === 'generated'   && <Text style={s.statusMuted}>Chart generated</Text>}
           {statusKey === 'error'       && <Text style={s.statusError}>{errorMsg}</Text>}
           {isRecording && <Text style={s.hintText}>tap to stop</Text>}
         </View>
 
-        {/* Record button — hidden on transcript and result card */}
-        {statusKey !== 'saved' && statusKey !== 'transcribed' && !chart && (
+        {/* Record button — hidden once we have a result */}
+        {!chart && (
           <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
             <TouchableOpacity
               style={[s.recordBtn, isRecording && s.recordBtnActive]}
-              onPress={isRecording
-                ? (mode === 'live' ? stopAndSaveLive : stopAndIdentify)
-                : startRecording}
+              onPress={isRecording ? stopAndIdentify : startRecording}
               disabled={isProcessing}
               activeOpacity={0.8}
             >
@@ -405,34 +295,24 @@ export default function RecordScreen() {
             </TouchableOpacity>
           </Animated.View>
         )}
-
       </View>
     </View>
   );
 }
 
-
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
-
-  root:   { flex: 1, backgroundColor: BG },
-  scroll: { flex: 1 },
+  root:          { flex: 1, backgroundColor: BG },
+  scroll:        { flex: 1 },
   scrollContent: { paddingTop: 24, paddingHorizontal: 24, flexGrow: 1 },
 
-  // ── Idle header ──────────────────────────────────────────────────────────
   idleHeader:  { paddingTop: 12, paddingBottom: 40 },
-  idleMain:    { color: CREAM, fontSize: 52, fontWeight: 'bold',   lineHeight: 58 },
-  idleAccent:  { color: GOLD,  fontSize: 52, fontStyle: 'italic',  lineHeight: 58, marginBottom: 14 },
+  idleMain:    { color: CREAM, fontSize: 52, fontWeight: 'bold',  lineHeight: 58 },
+  idleAccent:  { color: GOLD,  fontSize: 52, fontStyle: 'italic', lineHeight: 58, marginBottom: 14 },
   idleTagline: { color: MUTED, fontSize: 14 },
 
-  // ── Identified result card ────────────────────────────────────────────────
-  sourceBadge: {
-    color: GOLD_DIM,
-    fontSize: 9,
-    letterSpacing: 3.5,
-    marginBottom: 16,
-  },
+  sourceBadge: { color: GOLD_DIM, fontSize: 9, letterSpacing: 3.5, marginBottom: 16 },
   resultCard: {
     flexDirection:   'row',
     backgroundColor: '#16130e',
@@ -443,139 +323,49 @@ const s = StyleSheet.create({
     gap:             16,
     alignItems:      'flex-start',
   },
-  resultArtwork: {
-    width:       88,
-    height:      88,
-    borderWidth: 1,
-    borderColor: BORDER,
-    flexShrink:  0,
-  },
-  resultArtworkPlaceholder: {
-    width:           88,
-    height:          88,
-    borderWidth:     1,
-    borderColor:     BORDER,
-    backgroundColor: '#0e0c09',
-    justifyContent:  'center',
-    alignItems:      'center',
-    flexShrink:      0,
-  },
-  resultArtworkNote: { color: MUTED, fontSize: 28 },
-  resultInfo:        { flex: 1 },
-  resultTitle:       { color: CREAM, fontSize: 20, fontWeight: '700', lineHeight: 26, marginBottom: 4 },
-  resultArtist:      { color: GOLD,  fontSize: 14, fontStyle: 'italic', marginBottom: 12 },
-  resultPills:       { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
+  resultArtwork:            { width: 88, height: 88, borderWidth: 1, borderColor: BORDER, flexShrink: 0 },
+  resultArtworkPlaceholder: { width: 88, height: 88, borderWidth: 1, borderColor: BORDER, backgroundColor: '#0e0c09', justifyContent: 'center', alignItems: 'center', flexShrink: 0 },
+  resultArtworkNote:        { color: MUTED, fontSize: 28 },
+  resultInfo:               { flex: 1 },
+  resultTitle:              { color: CREAM, fontSize: 20, fontWeight: '700', lineHeight: 26, marginBottom: 4 },
+  resultArtist:             { color: GOLD, fontSize: 14, fontStyle: 'italic', marginBottom: 12 },
+  resultPills:              { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
 
-  openChartBtn: {
-    backgroundColor: GOLD,
-    paddingVertical:   16,
-    alignItems:        'center',
-    marginBottom:      14,
-  },
-  openChartTxt: {
-    color:         BG,
-    fontSize:      12,
-    fontWeight:    '700',
-    letterSpacing: 2,
-  },
+  openChartBtn:   { backgroundColor: GOLD, paddingVertical: 16, alignItems: 'center', marginBottom: 14 },
+  openChartTxt:   { color: BG, fontSize: 12, fontWeight: '700', letterSpacing: 2 },
   recordAgainBtn: { alignItems: 'center', paddingVertical: 8 },
   recordAgainTxt: { color: MUTED, fontSize: 13 },
 
-  // ── Bottom bar ────────────────────────────────────────────────────────────
   bottomBar: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    paddingBottom: 40,
-    paddingTop: 14,
-    alignItems: 'center',
+    position:        'absolute',
+    bottom:          0,
+    left:            0,
+    right:           0,
+    paddingBottom:   40,
+    paddingTop:      14,
+    alignItems:      'center',
     backgroundColor: BG,
-    borderTopWidth: 1,
-    borderTopColor: BORDER,
+    borderTopWidth:  1,
+    borderTopColor:  BORDER,
   },
 
-  statusRow: {
-    alignItems: 'center',
-    minHeight: 40,
-    justifyContent: 'center',
-    marginBottom: 16,
-  },
+  statusRow:       { alignItems: 'center', minHeight: 40, justifyContent: 'center', marginBottom: 16 },
   statusListening: { color: GOLD, fontSize: 14, letterSpacing: 0.5 },
-  statusRed:       { color: RED,  fontSize: 14, letterSpacing: 0.5 },
   statusMuted:     { color: MUTED, fontSize: 13 },
-  statusGold:      { color: GOLD,  fontSize: 13 },
-  statusError:     { color: RED,   fontSize: 13, textAlign: 'center', paddingHorizontal: 24 },
+  statusGold:      { color: GOLD, fontSize: 13 },
+  statusError:     { color: RED, fontSize: 13, textAlign: 'center', paddingHorizontal: 24 },
   hintText:        { color: MUTED, fontSize: 11, marginTop: 5 },
 
-  // ── Mode toggle ───────────────────────────────────────────────────────────
-  modeToggle: {
-    flexDirection:  'row',
-    borderWidth:    1,
-    borderColor:    BORDER,
-    marginBottom:   14,
-    overflow:       'hidden',
-  },
-  modeBtn:       { flex: 1, paddingVertical: 8, alignItems: 'center' },
-  modeBtnActive: { backgroundColor: GOLD },
-  modeBtnLive:   { backgroundColor: RED },
-  modeTxt:       { color: MUTED, fontSize: 10, fontWeight: '700', letterSpacing: 1.5 },
-  modeTxtActive: { color: BG },
-  modeTxtLive:   { color: '#fff' },
-
-  // ── Live transcript result ────────────────────────────────────────────────
-  transcriptLangRow: { flexDirection: 'row', marginBottom: 16 },
-  transcriptBox: {
-    backgroundColor: '#16130e',
-    borderWidth:     1,
-    borderColor:     BORDER,
-    padding:         20,
-    marginBottom:    24,
-  },
-  transcriptText: {
-    color:      CREAM,
-    fontSize:   16,
-    lineHeight: 28,
-  },
-
-  // ── Record button ─────────────────────────────────────────────────────────
   recordBtn: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
+    width: 80, height: 80, borderRadius: 40,
     backgroundColor: GOLD,
-    justifyContent: 'center',
-    alignItems: 'center',
-    // gold glow
-    shadowColor: GOLD,
-    shadowOpacity: 0.55,
-    shadowRadius: 22,
-    shadowOffset: { width: 0, height: 0 },
+    justifyContent: 'center', alignItems: 'center',
+    shadowColor: GOLD, shadowOpacity: 0.55, shadowRadius: 22, shadowOffset: { width: 0, height: 0 },
     elevation: 12,
   },
-  recordBtnActive: {
-    backgroundColor: RED,
-    shadowColor: RED,
-    shadowOpacity: 0.7,
-  },
-  recordBtnInner: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: 'rgba(0,0,0,0.15)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  recordBtnInnerActive: {
-    backgroundColor: 'rgba(0,0,0,0.2)',
-  },
-  recordIcon: {
-    color: BG,
-    fontSize: 26,
-    lineHeight: 30,
-  },
-  recordIconActive: {
-    color: '#fff',
-    fontSize: 20,
-  },
+  recordBtnActive: { backgroundColor: RED, shadowColor: RED, shadowOpacity: 0.7 },
+  recordBtnInner:  { width: 64, height: 64, borderRadius: 32, backgroundColor: 'rgba(0,0,0,0.15)', justifyContent: 'center', alignItems: 'center' },
+  recordBtnInnerActive: { backgroundColor: 'rgba(0,0,0,0.2)' },
+  recordIcon:       { color: BG, fontSize: 26, lineHeight: 30 },
+  recordIconActive: { color: '#fff', fontSize: 20 },
 });
