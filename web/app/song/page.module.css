@@ -1,0 +1,54 @@
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.back {
+  color: var(--text-dim);
+  font-size: 16px;
+  padding: 8px 0;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.action {
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  padding: 8px 16px;
+  font-size: 15px;
+}
+
+.actionPrimary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #15120a;
+  font-weight: 700;
+}
+
+.editBanner {
+  background: var(--chord-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 14px;
+  padding: 10px 14px;
+  margin-bottom: 18px;
+}
+
+.error {
+  text-align: center;
+  padding: 64px 16px;
+  color: var(--danger);
+}
+
+.errorHint {
+  color: var(--text-dim);
+  font-size: 15px;
+}

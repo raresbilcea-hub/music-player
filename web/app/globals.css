@@ -1,0 +1,79 @@
+/* Music Player 2.0 — dark, stage-friendly theme.
+   Palette carried over from the mobile app (LineView.tsx). */
+
+:root {
+  --bg: #0d0d0f;
+  --bg-raised: #18181c;
+  --bg-card: #1f1f25;
+  --border: #2e2e36;
+  --text: #e8dfc8;
+  --text-dim: #9a937f;
+  --chord: #c9a84c;
+  --chord-bg: rgba(201, 168, 76, 0.14);
+  --accent: #c9a84c;
+  --danger: #d4634f;
+  --ok: #6fae6f;
+  --radius: 12px;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 18px;
+  line-height: 1.5;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  min-height: 44px;
+}
+
+input {
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--text);
+}
+
+main {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 24px 16px 64px;
+}
+
+/* ── Print: white background, black lyrics, no UI chrome ───────────────── */
+
+@media print {
+  html,
+  body {
+    background: #fff;
+    color: #000;
+    font-size: 12px;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .chart-section {
+    break-inside: avoid;
+  }
+}

@@ -1,0 +1,62 @@
+.scroll {
+  overflow-x: auto;
+  margin-bottom: 14px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.inner {
+  /* Monospace + pre: 1 character = exactly 1ch, so chord `position`
+     indices map directly to columns. */
+  font-family: ui-monospace, "SF Mono", "Courier New", monospace;
+  font-size: 15px;
+  white-space: pre;
+  width: max-content;
+  min-width: 100%;
+}
+
+.chordRow {
+  position: relative;
+  height: 1.45em;
+}
+
+.chord {
+  position: absolute;
+  top: 0;
+  color: var(--chord);
+  font: inherit;
+  font-weight: 700;
+  min-height: 0;
+  padding: 0 1px;
+  line-height: 1.45;
+}
+
+.chordOnlyRow {
+  display: flex;
+  gap: 1.5ch;
+}
+
+.chordInline {
+  position: static;
+}
+
+.chordTappable {
+  text-decoration: underline dotted rgba(201, 168, 76, 0.5);
+  text-underline-offset: 3px;
+}
+
+.lyrics {
+  color: var(--text);
+  line-height: 1.5;
+}
+
+@media print {
+  .scroll {
+    overflow: visible;
+  }
+  .chord {
+    color: #444;
+  }
+  .lyrics {
+    color: #000;
+  }
+}

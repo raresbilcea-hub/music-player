@@ -1,0 +1,38 @@
+.header {
+  text-align: center;
+  padding: 28px 0 8px;
+}
+
+.logo {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  margin: 0;
+}
+
+.logo span {
+  color: var(--accent);
+}
+
+.tagline {
+  color: var(--text-dim);
+  font-size: 15px;
+  margin: 6px 0 0;
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--text-dim);
+  font-size: 14px;
+  margin: 18px 0 4px;
+}
+
+.divider::before,
+.divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}

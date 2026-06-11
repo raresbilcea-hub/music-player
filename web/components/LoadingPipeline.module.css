@@ -1,0 +1,48 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: 64px 24px;
+  text-align: center;
+}
+
+.bar {
+  width: 100%;
+  max-width: 320px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-card);
+  overflow: hidden;
+  position: relative;
+}
+
+.bar::after {
+  content: "";
+  position: absolute;
+  width: 40%;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  animation: slide 1.4s ease-in-out infinite;
+}
+
+@keyframes slide {
+  0% {
+    left: -40%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
+.stage {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.hint {
+  color: var(--text-dim);
+  font-size: 14px;
+  max-width: 340px;
+}

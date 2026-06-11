@@ -1,0 +1,71 @@
+.header {
+  margin-bottom: 24px;
+}
+
+.title {
+  font-size: 24px;
+  font-weight: 800;
+  margin: 0;
+}
+
+.artist {
+  color: var(--text-dim);
+  font-size: 17px;
+  margin: 2px 0 12px;
+}
+
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pill {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 14px;
+  font-size: 14px;
+  color: var(--text-dim);
+}
+
+.pill b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.verified {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.section {
+  margin-bottom: 28px;
+}
+
+.sectionLabel {
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  margin: 0 0 10px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+@media print {
+  .title,
+  .artist {
+    color: #000;
+  }
+  .sectionLabel {
+    color: #333;
+    border-color: #ccc;
+  }
+  .pill {
+    color: #333;
+    border-color: #ccc;
+    background: none;
+  }
+}

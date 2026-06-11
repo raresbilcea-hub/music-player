@@ -9,3 +9,8 @@ node_modules
 demucs-test-output/
 redemption.m4a
 test-clip.wav
+
+# Web app build artifacts
+web/node_modules/
+web/.next/
+web/.env.local

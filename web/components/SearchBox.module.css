@@ -1,0 +1,74 @@
+.box {
+  width: 100%;
+  padding: 14px 18px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  outline: none;
+  font-size: 17px;
+}
+
+.box:focus {
+  border-color: var(--accent);
+}
+
+.box::placeholder {
+  color: var(--text-dim);
+}
+
+.list {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  text-align: left;
+  width: 100%;
+}
+
+.row:active {
+  background: var(--chord-bg);
+}
+
+.artwork {
+  width: 52px;
+  height: 52px;
+  border-radius: 8px;
+  background: var(--bg-raised);
+  flex-shrink: 0;
+}
+
+.meta {
+  min-width: 0;
+}
+
+.title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artist {
+  color: var(--text-dim);
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hint {
+  color: var(--text-dim);
+  font-size: 15px;
+  text-align: center;
+  padding: 10px 0;
+}

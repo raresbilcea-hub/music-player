@@ -1,0 +1,56 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 24px 0;
+}
+
+.button {
+  width: 132px;
+  height: 132px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 3px solid var(--accent);
+  color: var(--accent);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.15s ease, background 0.2s ease;
+}
+
+.button:active {
+  transform: scale(0.95);
+}
+
+.listening {
+  background: var(--chord-bg);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(201, 168, 76, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 18px rgba(201, 168, 76, 0);
+  }
+}
+
+.status {
+  color: var(--text-dim);
+  font-size: 15px;
+  min-height: 24px;
+  text-align: center;
+}
+
+.error {
+  color: var(--danger);
+  font-size: 15px;
+  text-align: center;
+  max-width: 320px;
+}
