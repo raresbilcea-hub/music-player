@@ -4,6 +4,68 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is the **backend** for Music Player 2.0. The mobile app lives in `MusicPlayer20/` and has its own `CLAUDE.md`.
 
+## ⭐ Roadmap (current direction, post Paul/Rares strategy session)
+
+This section reflects a strategic pivot agreed by Rares (founder) and Paul (advising developer friend). It supersedes the older mobile-first / GPT-4o-chord-generation direction described in earlier project notes — read this first.
+
+### Why we're pivoting
+
+The previous "AI generates the chord chart" approach (`generateChartWithAI`, mode B) is GPT-4o recalling chords from training data — pattern-matching, not real transcription. For popular songs the existing UG/Cifra Club/e-chords scrape cascade (see "Chord chart pipeline" below) already produces better, human-curated charts and should be kept. But for anything not covered by those scrapes, hallucinated AI charts require too much manual correction and cause users to bounce. We need a real audio-based transcription pipeline.
+
+### New audio pipeline (Phase 1)
+
+```
+User records snippet / searches song
+  → AudD identification or iTunes search (existing)
+  → YouTube Data API: find matching video, extract audio
+  → Demucs (Replicate, model "htdemucs_6s") → isolate guitar stem
+       (htdemucs_6s also yields vocals/drums/bass/piano/other for free)
+  → Essentia → chord detection on the guitar stem
+  → Lyrics: Musixmatch / Genius / lrclib (extends existing fetchRealLyrics cascade)
+  → Static chord chart (NOT synced/scrolling playback like Chordify)
+```
+
+**Static chart, not scrolling playback** — better for working musicians at gigs (no internet dependency, printable, glanceable).
+
+**Replicate / Demucs notes:**
+- Pay-as-you-go GPU, no subscription. T4 ≈ $0.000225/sec (~$0.81/hr); roughly $0.01–0.02 per 30-sec test clip.
+- Model choice: `htdemucs_6s` (6-source: vocals/drums/bass/guitar/piano/other) — gives a dedicated guitar stem, unlike the default 4-source `htdemucs`.
+- **The "stem" input parameter is optional.** The Replicate Playground's web form *looks* like it forces you to pick one of vocals/bass/drums/guitar/piano/other from a dropdown, but that's just a UI quirk of the form widget. The underlying API field is nullable — per the model's own docs: *"Only separate audio into the chosen stem and others (no_stem)"*. When calling the API directly (which is what `server.js` will do), simply **don't include the `stem` key in the input object at all** → the model returns **all 6 separated stems** in one run. (Confirmed: a prior playground run returned bass/drums/other/vocals stems simultaneously.) If you ever need to test "all stems" via the Playground UI itself, use the "API"/code tab and omit `stem` from the request body — the Form tab's dropdown can't be left blank.
+
+### Platform pivot: web first
+
+- **Next.js web app first**, not the Expo/React Native app — avoids App Store review friction while validating the product (Paul's advice, Rares agreed).
+- The current `MusicPlayer20/` mobile app is **deprioritized, not abandoned** — revisit after the web MVP is validated.
+- **Carries over as-is:** Supabase (`chord_charts`, auth, `user_songs`), this Railway backend, chord-chart business logic, chord rendering/diagram logic.
+- **Rebuilt for web:** UI, navigation, audio capture/recording.
+- Rares is building the Next.js frontend and audio pipeline himself with Claude's help; Paul advises but isn't building.
+
+### Phasing
+
+- **Phase 1 (MVP)** — Guitar chords only, static charts. Validate with ~20 working musicians for about a month before expanding scope.
+- **Phase 1b (deferred — build only if users ask for it)** — Multi-instrument charts. Demucs already separates bass/piano/other; add Basic Pitch (Spotify, audio→MIDI) for note-level transcription of those stems.
+- **Phase 2 (later)** — Accept user-uploaded recordings of their own original songs (not label catalogue), transcribe via Whisper (already integrated for `/transcribe`) + the chord pipeline.
+
+### Pricing
+
+- Subscription cap: **$12/month max** — hard constraint from Rares, do not design pricing tiers above this.
+- Free tier: **3 songs/month** (reduced from an earlier plan of 5, to control AI/API cost while the user base is small).
+
+### Differentiators vs. Chordify
+
+- Shazam-style entry point: record → auto-identify → auto chart, no manual YouTube link needed.
+- Crowdsourced verified-correction database (Chordify has nothing like the existing `verified` flag / correction flow).
+- Chord fretboard diagrams with finger positions (already built — `ChordDiagram.tsx` / `ChordPreview`).
+- Static, printable charts; works offline once generated.
+
+### Legal considerations / open risks (not yet resolved)
+
+- YouTube audio extraction is a ToS violation — Chordify operates this way regardless, but it's a known risk, not a cleared one.
+- The existing UG scraping in `fetchChartFromUG` is **also** a ToS violation — newly identified risk in the current backend, not introduced by the new pipeline.
+- Lyrics require licensing: Musixmatch has publisher deals; Genius/lrclib are legal gray areas.
+- Chord progressions themselves are not copyrightable — lower risk than lyrics/audio.
+- For Phase 2, frame it as "transcribe the user's own original recordings", not "songs outside the label catalogue" — avoids implying we're circumventing licensing for popular music.
+
 ## Commands
 
 ```bash

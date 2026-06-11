@@ -3,3 +3,9 @@ node_modules
 
 .env
 .claude/
+
+# Local audio test artifacts
+.expo/
+demucs-test-output/
+redemption.m4a
+test-clip.wav

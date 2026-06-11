@@ -9,6 +9,7 @@ const { createClient } = require("@supabase/supabase-js");
 const fs   = require("fs");
 const path = require("path");
 const os   = require("os");
+const { analyzeAudioForChords } = require("./audioAnalysis");
 
 const app = express();
 const port = 3000;
@@ -327,7 +328,7 @@ function validateAndRepairChart(chart) {
 
 // ─── Chart generation ─────────────────────────────────────────────────────────
 
-async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spotifyTempo, realLyrics) {
+async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spotifyTempo, realLyrics, detectedChords) {
   var keyInfo = spotifyKey
     ? "Confirmed musical key: " + spotifyKey + " (Spotify audio analysis)."
     : "Identify the exact musical key from your training data.";
@@ -370,6 +371,24 @@ async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spoti
     "  - Standard chord names only: G, D, Em, A7, Cmaj7, F#m, Bb, D/F#. No tablature, no rhythm notation.",
   ].join("\n");
 
+  // If audio analysis (Demucs + Essentia) detected real chords from the
+  // original recording, constrain the model to that harmonic content instead
+  // of letting it recall/hallucinate chords freely.
+  var detectedChordsLines = [];
+  if (detectedChords && detectedChords.chords && detectedChords.chords.length > 0) {
+    detectedChordsLines = [
+      "ACTUAL CHORDS DETECTED FROM THE ORIGINAL RECORDING (audio analysis of an isolated stem):",
+      "  Chord vocabulary: " + detectedChords.chords.join(", "),
+      "  Representative progression sample: " + detectedChords.progression.join(" - "),
+      "",
+      "Use ONLY chords from this vocabulary (plus simple extensions/variants of them — 7ths,",
+      "sus, add9, slash chords on the same root) throughout the song. Use the progression",
+      "sample as a guide for the recurring chord loop and adapt/repeat it across sections.",
+      "This takes priority over your own recollection of the song's chords if they conflict.",
+      "",
+    ];
+  }
+
   var systemPrompt, userPrompt;
 
   if (realLyrics) {
@@ -383,6 +402,7 @@ async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spoti
       "",
       FORMAT_SPEC,
       "",
+      ...detectedChordsLines,
       "RULES",
       "  1. COPY THE LYRICS WORD-FOR-WORD. Do not change, omit, fix, or invent a single word.",
       "  2. Use the ACTUAL chords from the original recording — recall them from your training data, do not substitute generic ones.",
@@ -419,6 +439,7 @@ async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spoti
       "",
       FORMAT_SPEC,
       "",
+      ...detectedChordsLines,
       "RULES",
       "  1. Lyrics must be EXACT — word-for-word as sung on the original recording. No paraphrasing or invention.",
       "  2. Chords must be ACCURATE — the actual chords from the original recording, not generic substitutes.",
@@ -476,6 +497,20 @@ async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spoti
     sections:   sections,
   };
   return validateAndRepairChart(chart);
+}
+
+// Real audio-based chord detection: Demucs (Replicate) isolates a guitar
+// stem from a 30s iTunes preview, essentia.js detects chords from it, and
+// the AI is constrained to those real chords when placing them against
+// lyrics/structure. Returns null if any stage doesn't yield enough signal,
+// so the caller can fall back to plain AI recall.
+async function fetchChartFromAudioAnalysis(title, artist, releaseDate, realLyrics, spotifyKey, spotifyTempo) {
+  var detectedChords = await analyzeAudioForChords(title, artist);
+  if (!detectedChords) return null;
+
+  console.log("Audio analysis: detected chords", detectedChords.chords.join(", "), "for", title, "by", artist);
+  var chart = await generateChartWithAI(title, artist, releaseDate, spotifyKey, spotifyTempo, realLyrics, detectedChords);
+  return { chart: chart, source: "audio_analysis" };
 }
 
 async function saveChartToDB(chart, title, artist, source) {
@@ -849,9 +884,9 @@ async function fetchHtml(url) {
   }
 }
 
-// ── Orchestrator: try real chord sources → fall back to LLM ─────────────────
+// ── Orchestrator: try real chord sources → audio analysis → fall back to LLM ─
 // Returns { chart, source } where source is one of:
-//   "cifraclub", "echords", "ai_generated"
+//   "ultimate_guitar", "cifraclub", "echords", "audio_analysis", "ai_generated"
 
 async function fetchChartFromSources(title, artist, releaseDate) {
   console.log("Sources: trying Ultimate-Guitar for", title, "by", artist);
@@ -866,12 +901,24 @@ async function fetchChartFromSources(title, artist, releaseDate) {
   chart = await fetchChartFromEchords(title, artist);
   if (chart) return { chart: chart, source: "echords" };
 
-  // Last resort — LLM with our existing lyrics + Spotify pipeline
-  console.log("Sources: no real source had the song, falling back to AI");
+  // No human-curated source had it — gather lyrics + key/tempo once, shared
+  // by both the audio-analysis attempt and the final AI fallback.
+  console.log("Sources: no real source had the song, fetching lyrics + key for analysis/AI");
   var [lyricsResult, spotifyResult] = await Promise.all([
     fetchRealLyrics(title, artist),
     lookupSpotifyKey(title, artist),
   ]);
+
+  console.log("Sources: trying audio analysis (Demucs + Essentia) for", title, "by", artist);
+  try {
+    var analysisResult = await fetchChartFromAudioAnalysis(title, artist, releaseDate || null, lyricsResult, spotifyResult.spotifyKey, spotifyResult.spotifyTempo);
+    if (analysisResult) return analysisResult;
+  } catch(e) {
+    console.log("Sources: audio analysis failed, falling back to AI:", e.message);
+  }
+
+  // Last resort — LLM with our existing lyrics + Spotify pipeline
+  console.log("Sources: falling back to plain AI generation");
   chart = await generateChartWithAI(title, artist, releaseDate || null, spotifyResult.spotifyKey, spotifyResult.spotifyTempo, lyricsResult);
   return { chart: chart, source: "ai_generated" };
 }
