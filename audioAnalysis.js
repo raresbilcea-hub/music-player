@@ -36,7 +36,8 @@ const HOP_SIZE = 2048;
 const MIN_CHORD_DURATION = 0.6;   // seconds — segments shorter than this are flicker
 const MIN_DISTINCT_CHORDS = 2;    // quality gate
 const MIN_AVG_STRENGTH = 0.4;     // quality gate
-const MIN_VOCAB_SHARE = 0.08;     // a chord must ring for >=8% of the clip to count
+const MIN_VOCAB_SHARE = 0.04;        // minimum share of the clip for any chord
+const MIN_NON_DIATONIC_SHARE = 0.15; // chords outside the detected key need much more
 const MAX_VOCAB_SIZE = 6;
 const MAX_PROGRESSION_LENGTH = 16;
 const NO_CHORD_LABEL = "N";       // essentia's "no chord / silence" label
@@ -291,8 +292,33 @@ function smoothChordTimeline(segments, clipDuration) {
   return collapsed;
 }
 
+// ─── Diatonic filtering ──────────────────────────────────────────────────────
+// Essentia's chord labels are major ("G") or minor ("Em") triads. Given a
+// detected key, the six diatonic triads are trusted at a low duration share;
+// anything outside the key needs a much larger share to survive (it's far
+// more often a detection artifact than a real borrowed chord in a 30s clip).
+
+var NOTE_TO_SEMITONE = { "C": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3, "E": 4, "F": 5, "F#": 6, "Gb": 6, "G": 7, "G#": 8, "Ab": 8, "A": 9, "A#": 10, "Bb": 10, "B": 11, "Cb": 11 };
+
+function isDiatonic(chordLabel, key) {
+  var km = String(key || "").match(/^([A-G][#b]?)\s+(major|minor)$/i);
+  var cm = String(chordLabel || "").match(/^([A-G][#b]?)(m?)$/);
+  if (!km || !cm) return true; // can't tell -> don't filter on it
+  var keyRoot = NOTE_TO_SEMITONE[km[1]];
+  var chordRoot = NOTE_TO_SEMITONE[cm[1]];
+  if (keyRoot === undefined || chordRoot === undefined) return true;
+  var chordIsMinor = cm[2] === "m";
+  // [interval from key root, triad is minor]
+  var triads = /major/i.test(km[2])
+    ? [[0, false], [2, true], [4, true], [5, false], [7, false], [9, true]]
+    : [[0, true], [3, false], [5, true], [7, true], [8, false], [10, false]];
+  return triads.some(function (t) {
+    return (keyRoot + t[0]) % 12 === chordRoot && t[1] === chordIsMinor;
+  });
+}
+
 // Returns { vocabulary, progression, distinctCount, avgStrength }
-function summarizeTimeline(timeline) {
+function summarizeTimeline(timeline, detectedKey) {
   var totalDuration = 0, weightedStrength = 0;
   var durationByChord = {};
   var progression = [];
@@ -307,9 +333,15 @@ function summarizeTimeline(timeline) {
   // Only chords that ring for a meaningful share of the clip make the
   // vocabulary — brief detections at section boundaries are noise, and any
   // noise here gets baked into the chart because the LLM is told to use
-  // exactly these chords.
+  // exactly these chords. Chords in the detected key are trusted at a low
+  // share; out-of-key chords need a large share to count.
   var vocabulary = Object.keys(durationByChord)
-    .filter(function (c) { return totalDuration > 0 && durationByChord[c] / totalDuration >= MIN_VOCAB_SHARE; })
+    .filter(function (c) {
+      if (totalDuration <= 0) return false;
+      var share = durationByChord[c] / totalDuration;
+      var threshold = isDiatonic(c, detectedKey) ? MIN_VOCAB_SHARE : MIN_NON_DIATONIC_SHARE;
+      return share >= threshold;
+    })
     .sort(function (a, b) { return durationByChord[b] - durationByChord[a]; })
     .slice(0, MAX_VOCAB_SIZE);
   var inVocab = {};
@@ -360,7 +392,7 @@ async function analyzeAudioForChords(title, artist) {
       var stemBuffer = await downloadBuffer(stemUrl);
       var raw = await detectChordsFromAudio(stemBuffer);
       var timeline = smoothChordTimeline(raw.segments, raw.clipDuration);
-      var summary = summarizeTimeline(timeline);
+      var summary = summarizeTimeline(timeline, detectedKey);
       if (summary.distinctCount >= MIN_DISTINCT_CHORDS && summary.avgStrength >= MIN_AVG_STRENGTH) {
         console.log("audioAnalysis: using " + stemName + " stem - " + summary.distinctCount + " chords, avg strength " + summary.avgStrength.toFixed(2));
         return {
@@ -379,4 +411,9 @@ async function analyzeAudioForChords(title, artist) {
   return null;
 }
 
-module.exports = { analyzeAudioForChords, detectKeyFromAudio };
+module.exports = {
+  analyzeAudioForChords,
+  detectKeyFromAudio,
+  // exposed for test scripts only
+  _internals: { detectChordsFromAudio, smoothChordTimeline, summarizeTimeline, isDiatonic, findItunesPreview },
+};
