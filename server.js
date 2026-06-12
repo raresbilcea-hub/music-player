@@ -953,7 +953,22 @@ async function fetchChartFromSources(title, artist, releaseDate) {
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
-app.get("/", function(req, res) { res.send("Music Player 2.0 server is running!"); });
+app.get("/", function(req, res) {
+  // Health check + config presence (booleans only, never the values).
+  // Lets us see from outside whether the deployed environment has each
+  // service key — the audio pipeline silently falls back to AI recall
+  // when REPLICATE_API_TOKEN is missing, which is invisible otherwise.
+  res.json({
+    status: "Music Player 2.0 server is running!",
+    config: {
+      replicate: !!process.env.REPLICATE_API_TOKEN,
+      openai:    !!process.env.OPENAI_API_KEY,
+      supabase:  !!(process.env.SUPABASE_URL && process.env.SUPABASE_KEY),
+      audd:      !!process.env.AUDD_API_KEY,
+      spotify:   !!(process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET),
+    },
+  });
+});
 
 app.get("/search", async function(req, res) {
   const query = req.query.q;
