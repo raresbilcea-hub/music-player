@@ -69,15 +69,40 @@ setInterval(function () {
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
+// Loose artist comparison so "Hannes" matches "Hannes & waterbaby" or
+// "Bob Marley" matches "Bob Marley & The Wailers". Sources disagree on
+// featured-artist suffixes, and an exact-match miss regenerates the chart
+// from scratch — potentially shadowing a musician-verified one.
+function artistsLooselyMatch(a, b) {
+  function norm(s) {
+    return String(s || "")
+      .toLowerCase()
+      .replace(/\s*(&|and|feat\.?|featuring|with|x|,)\s+.*$/i, "")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  }
+  var na = norm(a), nb = norm(b);
+  if (!na || !nb) return false;
+  return na === nb || na.indexOf(nb) !== -1 || nb.indexOf(na) !== -1;
+}
+
 async function fetchChartFromDB(title, artist) {
   var { data: rows } = await supabase
     .from("chord_charts")
     .select("*")
     .ilike("title", title)
-    .ilike("artist", artist)
-    .limit(1);
+    .limit(10);
   if (!rows || rows.length === 0) return null;
-  var r = rows[0];
+
+  var candidates = rows.filter(function (r) { return artistsLooselyMatch(r.artist, artist); });
+  if (candidates.length === 0) return null;
+
+  // Prefer musician-verified charts, then the most-played one.
+  candidates.sort(function (a, b) {
+    if (!!b.verified !== !!a.verified) return b.verified ? 1 : -1;
+    return (b.play_count || 0) - (a.play_count || 0);
+  });
+  var r = candidates[0];
   await supabase.from("chord_charts").update({ play_count: (r.play_count || 0) + 1 }).eq("id", r.id);
   return { title: r.title, artist: r.artist, musicalKey: r.musical_key, tempo: r.tempo, capo: r.capo, sections: r.sections, verified: r.verified, source: r.source };
 }
@@ -509,7 +534,10 @@ async function fetchChartFromAudioAnalysis(title, artist, releaseDate, realLyric
   if (!detectedChords) return null;
 
   console.log("Audio analysis: detected chords", detectedChords.chords.join(", "), "for", title, "by", artist);
-  var chart = await generateChartWithAI(title, artist, releaseDate, spotifyKey, spotifyTempo, realLyrics, detectedChords);
+  // Spotify's key endpoint is gone (403), so the key heard in the actual
+  // recording is our best "confirmed key" for the prompt's key enforcement.
+  var confirmedKey = spotifyKey || detectedChords.key || null;
+  var chart = await generateChartWithAI(title, artist, releaseDate, confirmedKey, spotifyTempo, realLyrics, detectedChords);
   return { chart: chart, source: "audio_analysis" };
 }
 

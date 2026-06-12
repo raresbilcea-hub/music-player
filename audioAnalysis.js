@@ -36,6 +36,7 @@ const HOP_SIZE = 2048;
 const MIN_CHORD_DURATION = 0.6;   // seconds — segments shorter than this are flicker
 const MIN_DISTINCT_CHORDS = 2;    // quality gate
 const MIN_AVG_STRENGTH = 0.4;     // quality gate
+const MIN_VOCAB_SHARE = 0.08;     // a chord must ring for >=8% of the clip to count
 const MAX_VOCAB_SIZE = 6;
 const MAX_PROGRESSION_LENGTH = 16;
 const NO_CHORD_LABEL = "N";       // essentia's "no chord / silence" label
@@ -150,6 +151,28 @@ function readWavAsFloat32(wavPath) {
   });
 }
 
+// Detect the musical key from an audio buffer (run on the full mix, not a
+// stem — key estimation works best with all instruments present). Replaces
+// the Spotify audio-analysis lookup, which Spotify shut down (returns 403).
+// Returns e.g. "Db major" or null.
+async function detectKeyFromAudio(buffer) {
+  var wavPath = await convertToWav(buffer);
+  try {
+    var signal = await readWavAsFloat32(wavPath);
+    var essentia = new Essentia(EssentiaWASM);
+    var result = essentia.KeyExtractor(essentia.arrayToVector(signal));
+    if (!result || !result.key) return null;
+    console.log("audioAnalysis: detected key " + result.key + " " + result.scale + " (strength " + result.strength.toFixed(2) + ")");
+    if (result.strength < 0.5) return null; // too uncertain to enforce
+    return result.key + " " + result.scale;
+  } catch (e) {
+    console.log("audioAnalysis: key detection failed:", e.message);
+    return null;
+  } finally {
+    try { fs.unlinkSync(wavPath); } catch (e) {}
+  }
+}
+
 // Returns { segments: [{ time, chord, strength }], clipDuration }
 async function detectChordsFromAudio(buffer) {
   var wavPath = await convertToWav(buffer);
@@ -245,12 +268,26 @@ function summarizeTimeline(timeline) {
       progression.push(s.chord);
     }
   });
+  // Only chords that ring for a meaningful share of the clip make the
+  // vocabulary — brief detections at section boundaries are noise, and any
+  // noise here gets baked into the chart because the LLM is told to use
+  // exactly these chords.
   var vocabulary = Object.keys(durationByChord)
+    .filter(function (c) { return totalDuration > 0 && durationByChord[c] / totalDuration >= MIN_VOCAB_SHARE; })
     .sort(function (a, b) { return durationByChord[b] - durationByChord[a]; })
     .slice(0, MAX_VOCAB_SIZE);
+  var inVocab = {};
+  vocabulary.forEach(function (c) { inVocab[c] = true; });
+  var cleanProgression = [];
+  progression.forEach(function (c) {
+    if (!inVocab[c]) return;
+    if (cleanProgression.length === 0 || cleanProgression[cleanProgression.length - 1] !== c) {
+      cleanProgression.push(c);
+    }
+  });
   return {
     vocabulary: vocabulary,
-    progression: progression.slice(0, MAX_PROGRESSION_LENGTH),
+    progression: cleanProgression.slice(0, MAX_PROGRESSION_LENGTH),
     distinctCount: vocabulary.length,
     avgStrength: totalDuration > 0 ? weightedStrength / totalDuration : 0,
   };
@@ -272,7 +309,10 @@ async function analyzeAudioForChords(title, artist) {
   }
 
   console.log("audioAnalysis: running Demucs on 30s preview for", title, "by", artist, "...");
-  var stems = await runDemucs(previewBuffer);
+  var stemsPromise = runDemucs(previewBuffer);
+  var keyPromise = detectKeyFromAudio(previewBuffer).catch(function () { return null; });
+  var stems = await stemsPromise;
+  var detectedKey = await keyPromise;
   if (!stems) return null;
 
   var stemOrder = ["guitar", "other"];
@@ -290,6 +330,7 @@ async function analyzeAudioForChords(title, artist) {
         return {
           chords: summary.vocabulary,
           progression: summary.progression,
+          key: detectedKey,
           sourceClip: "itunes_preview_30s",
         };
       }
@@ -302,4 +343,4 @@ async function analyzeAudioForChords(title, artist) {
   return null;
 }
 
-module.exports = { analyzeAudioForChords };
+module.exports = { analyzeAudioForChords, detectKeyFromAudio };
