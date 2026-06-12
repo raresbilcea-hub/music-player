@@ -18,7 +18,9 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const { execFile } = require("child_process");
 const axios = require("axios");
+const FormData = require("form-data");
 const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("ffmpeg-static");
 const wav = require("wav");
@@ -33,6 +35,7 @@ const SAMPLE_RATE = 44100;
 const FRAME_SIZE = 4096;
 const HOP_SIZE = 2048;
 
+const MAX_SONG_SECONDS = 600;     // skip YouTube hits longer than 10 min (live sets, mixes)
 const MIN_CHORD_DURATION = 0.6;   // seconds — segments shorter than this are flicker
 const MIN_DISTINCT_CHORDS = 2;    // quality gate
 const MIN_AVG_STRENGTH = 0.4;     // quality gate
@@ -96,19 +99,135 @@ async function downloadBuffer(url) {
   return Buffer.from(res.data);
 }
 
+// ─── Full-song audio via YouTube (yt-dlp) ─────────────────────────────────────
+// Founder's decision (see CLAUDE.md roadmap): analyze the full recording, not
+// just the 30s preview. yt-dlp ships as a declared npm dependency
+// (youtube-dl-exec) — no runtime downloads. YouTube bot-blocks many
+// datacenter IPs, so every failure here returns null and the caller falls
+// back to the iTunes preview path.
+
+// Resolve yt-dlp: a system install (brew locally, nixpacks on Railway —
+// see nixpacks.toml) is preferred; the npm-bundled zipapp works wherever
+// Python >= 3.10 exists.
+var YT_DLP_CANDIDATES = [
+  process.env.YT_DLP_PATH,
+  "/opt/homebrew/bin/yt-dlp",
+  "/usr/local/bin/yt-dlp",
+  "/usr/bin/yt-dlp",
+  path.join(__dirname, "node_modules", "youtube-dl-exec", "bin", "yt-dlp"),
+].filter(Boolean);
+
+function resolveYtDlp() {
+  for (var i = 0; i < YT_DLP_CANDIDATES.length; i++) {
+    if (fs.existsSync(YT_DLP_CANDIDATES[i])) return YT_DLP_CANDIDATES[i];
+  }
+  return null;
+}
+
+function runYtDlp(args, timeoutMs) {
+  return new Promise(function (resolve) {
+    execFile(resolveYtDlp(), args, { timeout: timeoutMs || 180000, maxBuffer: 10 * 1024 * 1024 }, function (err, stdout, stderr) {
+      resolve({ err: err, stdout: String(stdout || ""), stderr: String(stderr || "") });
+    });
+  });
+}
+
+// Download the full song from YouTube. Returns { buffer, videoTitle } or null.
+async function downloadFullSong(title, artist) {
+  if (!resolveYtDlp()) {
+    console.log("audioAnalysis: yt-dlp not installed — full-song path unavailable");
+    return null;
+  }
+
+  var query = "ytsearch3:" + title + " " + artist + " official audio";
+  // Probe the search results first (cheap, metadata only) and pick the first
+  // hit whose video title actually contains the song title — same defense as
+  // the iTunes matcher: search ranking is not relevance.
+  var probe = await runYtDlp([
+    query,
+    "--print", "%(id)s\t%(duration)s\t%(title)s",
+    "--no-playlist", "--no-warnings", "--skip-download",
+  ], 60000);
+  if (probe.err) {
+    console.log("audioAnalysis: YouTube search failed:", (probe.stderr || probe.err.message).split("\n")[0]);
+    return null;
+  }
+
+  var wantTitle = normalizeForMatch(title);
+  var chosen = null;
+  probe.stdout.split("\n").forEach(function (line) {
+    if (chosen) return;
+    var parts = line.split("\t");
+    if (parts.length < 3) return;
+    var duration = parseFloat(parts[1]);
+    var videoTitle = parts.slice(2).join("\t");
+    if (!duration || duration > MAX_SONG_SECONDS || duration < 60) return;
+    if (normalizeForMatch(videoTitle).indexOf(wantTitle) === -1) return;
+    chosen = { id: parts[0], duration: duration, title: videoTitle };
+  });
+  if (!chosen) {
+    console.log("audioAnalysis: no YouTube result matched '" + title + "' — falling back to preview");
+    return null;
+  }
+  console.log("audioAnalysis: downloading full song from YouTube: \"" + chosen.title + "\" (" + Math.round(chosen.duration) + "s)");
+
+  var outPath = path.join(os.tmpdir(), "fullsong-" + crypto.randomUUID() + ".mp3");
+  var dl = await runYtDlp([
+    "https://www.youtube.com/watch?v=" + chosen.id,
+    "-f", "bestaudio",
+    "-x", "--audio-format", "mp3", "--audio-quality", "128K",
+    "--max-filesize", "25M",
+    "--no-playlist", "--no-warnings",
+    "--ffmpeg-location", ffmpegPath,
+    "-o", outPath,
+  ], 240000);
+  if (dl.err || !fs.existsSync(outPath)) {
+    console.log("audioAnalysis: YouTube download failed:", (dl.stderr || (dl.err && dl.err.message) || "no output file").split("\n")[0]);
+    try { fs.unlinkSync(outPath); } catch (_) {}
+    return null;
+  }
+  var buffer = fs.readFileSync(outPath);
+  try { fs.unlinkSync(outPath); } catch (_) {}
+  console.log("audioAnalysis: full song downloaded (" + (buffer.length / 1024 / 1024).toFixed(1) + " MB)");
+  return { buffer: buffer, videoTitle: chosen.title };
+}
+
+// Replicate's data-URI inputs are only safe for small files; full songs go
+// through the Files API and are passed by URL instead.
+async function uploadToReplicate(buffer) {
+  var form = new FormData();
+  form.append("content", buffer, { filename: "audio.mp3", contentType: "audio/mpeg" });
+  var res = await axios.post("https://api.replicate.com/v1/files", form, {
+    headers: Object.assign({ Authorization: "Bearer " + REPLICATE_API_TOKEN }, form.getHeaders()),
+    maxBodyLength: 50 * 1024 * 1024,
+  });
+  return res.data && res.data.urls && res.data.urls.get ? res.data.urls.get : null;
+}
+
 async function runDemucs(audioBuffer) {
   if (!REPLICATE_API_TOKEN) {
     console.log("audioAnalysis: no REPLICATE_API_TOKEN configured, skipping Demucs");
     return null;
   }
   try {
-    var dataUri = "data:audio/mp4;base64," + audioBuffer.toString("base64");
+    // Small clips ride along as data URIs; full songs are uploaded to
+    // Replicate's Files API first and passed by URL.
+    var audioInput;
+    if (audioBuffer.length > 1024 * 1024) {
+      audioInput = await uploadToReplicate(audioBuffer);
+      if (!audioInput) {
+        console.log("audioAnalysis: Replicate file upload failed");
+        return null;
+      }
+    } else {
+      audioInput = "data:audio/mp4;base64," + audioBuffer.toString("base64");
+    }
     var createRes = await axios.post(
       "https://api.replicate.com/v1/predictions",
       {
         version: REPLICATE_DEMUCS_VERSION,
         input: {
-          audio: dataUri,
+          audio: audioInput,
           model_name: "htdemucs_6s",
           clip_mode: "rescale",
           // no "stem" key on purpose -> Replicate returns ALL 6 stems
@@ -124,7 +243,7 @@ async function runDemucs(audioBuffer) {
     );
 
     var prediction = createRes.data;
-    var maxPolls = 90; // ~3 minutes safety cap
+    var maxPolls = 300; // ~10 minutes safety cap (full songs take a while)
     var polls = 0;
     while (!["succeeded", "failed", "canceled"].includes(prediction.status) && polls < maxPolls) {
       await new Promise(function (r) { setTimeout(r, 2000); });
@@ -362,23 +481,36 @@ function summarizeTimeline(timeline, detectedKey) {
 }
 
 async function analyzeAudioForChords(title, artist) {
-  var previewUrl = await findItunesPreview(title, artist);
-  if (!previewUrl) {
-    console.log("audioAnalysis: no iTunes preview found for", title, "by", artist);
+  // Best source first: the full song from YouTube. Falls back to the 30s
+  // iTunes preview when YouTube is blocked or has no matching video.
+  var sourceClip = null;
+  var audioBuffer = null;
+
+  var fullSong = await downloadFullSong(title, artist).catch(function (e) {
+    console.log("audioAnalysis: full-song path error:", e.message);
     return null;
+  });
+  if (fullSong) {
+    audioBuffer = fullSong.buffer;
+    sourceClip = "youtube_full";
+  } else {
+    var previewUrl = await findItunesPreview(title, artist);
+    if (!previewUrl) {
+      console.log("audioAnalysis: no iTunes preview found for", title, "by", artist);
+      return null;
+    }
+    try {
+      audioBuffer = await downloadBuffer(previewUrl);
+    } catch (e) {
+      console.log("audioAnalysis: failed to download preview:", e.message);
+      return null;
+    }
+    sourceClip = "itunes_preview_30s";
   }
 
-  var previewBuffer;
-  try {
-    previewBuffer = await downloadBuffer(previewUrl);
-  } catch (e) {
-    console.log("audioAnalysis: failed to download preview:", e.message);
-    return null;
-  }
-
-  console.log("audioAnalysis: running Demucs on 30s preview for", title, "by", artist, "...");
-  var stemsPromise = runDemucs(previewBuffer);
-  var keyPromise = detectKeyFromAudio(previewBuffer).catch(function () { return null; });
+  console.log("audioAnalysis: running Demucs on " + sourceClip + " for", title, "by", artist, "...");
+  var stemsPromise = runDemucs(audioBuffer);
+  var keyPromise = detectKeyFromAudio(audioBuffer).catch(function () { return null; });
   var stems = await stemsPromise;
   var detectedKey = await keyPromise;
   if (!stems) return null;
@@ -404,7 +536,7 @@ async function analyzeAudioForChords(title, artist) {
           timeline: timeline.filter(function (s) { return summary.vocabulary.indexOf(s.chord) !== -1; }),
           clipDuration: raw.clipDuration,
           vocalsUrl: stems.vocals || null, // for Whisper-based lyric alignment
-          sourceClip: "itunes_preview_30s",
+          sourceClip: sourceClip,
         };
       }
       console.log("audioAnalysis: " + stemName + " stem too weak (" + summary.distinctCount + " chords, avg strength " + summary.avgStrength.toFixed(2) + ") - trying next");
@@ -420,5 +552,5 @@ module.exports = {
   analyzeAudioForChords,
   detectKeyFromAudio,
   // exposed for test scripts only
-  _internals: { detectChordsFromAudio, smoothChordTimeline, summarizeTimeline, isDiatonic, findItunesPreview },
+  _internals: { detectChordsFromAudio, smoothChordTimeline, summarizeTimeline, isDiatonic, findItunesPreview, downloadFullSong },
 };

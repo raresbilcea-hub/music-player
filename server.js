@@ -422,35 +422,63 @@ async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spoti
   // of letting it recall/hallucinate chords freely.
   var detectedChordsLines = [];
   if (detectedChords && detectedChords.chords && detectedChords.chords.length > 0) {
+    var vocabSize = detectedChords.chords.length;
     detectedChordsLines = [
-      "ACTUAL CHORDS DETECTED FROM THE ORIGINAL RECORDING (audio analysis of an isolated stem):",
+      "ACTUAL CHORDS DETECTED FROM THE ORIGINAL RECORDING (audio analysis of an isolated stem",
+      "from a ~30-second preview clip):",
       "  Chord vocabulary: " + detectedChords.chords.join(", "),
       "  Representative progression sample: " + detectedChords.progression.join(" - "),
       "",
-      "Use ONLY chords from this vocabulary (plus simple extensions/variants of them — 7ths,",
-      "sus, add9, slash chords on the same root) throughout the song. Use the progression",
-      "sample as a guide for the recurring chord loop and adapt/repeat it across sections.",
-      "This takes priority over your own recollection of the song's chords if they conflict.",
-      "",
+      "The measurement covers only a ~30-second window of the song. That window may land on a",
+      "harmonically static section (e.g. a one-chord vamp) while other sections of the song",
+      "move through more chords. Apply it accordingly:",
+      "  - For the section(s) of the song the progression sample matches, use these measured",
+      "    chords exactly (plus simple extensions/variants of them — 7ths, sus, add9, slash",
+      "    chords on the same root). Where your recollection conflicts with the measurement",
+      "    for that passage, the measurement wins.",
+      "  - For the song's OTHER sections, recall their actual chords from your training data.",
+      "    Every chord you use beyond the measured vocabulary MUST be diatonic to the confirmed",
+      "    key. Do NOT flatten the whole song to the measured vocabulary if you know other",
+      "    sections change chords.",
     ];
+    if (vocabSize <= 2) {
+      detectedChordsLines.push(
+        "  - The measured window contains only " + vocabSize + " distinct chord" + (vocabSize === 1 ? "" : "s") + " — it almost certainly",
+        "    covers a static section. Expect the rest of the song to move through more chords",
+        "    (still diatonic to the confirmed key)."
+      );
+    }
+    detectedChordsLines.push("");
   }
 
   // Lines whose chord placements were MEASURED by aligning the chord
   // timeline with time-stamped lyrics — the model must reproduce these
-  // verbatim and pattern-match the rest of the song to them.
-  if (alignedLines && alignedLines.length > 0) {
+  // verbatim and pattern-match the rest of the song to them. alignedLines
+  // is { lines, highCoverage } — with full-song audio nearly every line is
+  // measured and the model's job collapses to section labelling.
+  if (alignedLines && alignedLines.lines && alignedLines.lines.length > 0) {
+    var closing = alignedLines.highCoverage
+      ? [
+          "",
+          "Nearly the ENTIRE song above is measured. Your job is ONLY to group these lines",
+          "into sections with [Section] headers (and repeat sections where the song repeats",
+          "them). For the few unmeasured lines, follow the pattern of their neighbours.",
+          "Do not re-harmonize anything.",
+          "",
+        ]
+      : [
+          "",
+          "These measured lines reveal the song's true chord pattern. Sections parallel to them",
+          "(other verses, other choruses, repeats of the same melody) MUST follow the same chord",
+          "pattern at the same lyrical positions. Do not simplify or substitute.",
+          "",
+        ];
     detectedChordsLines = detectedChordsLines.concat([
       "MEASURED FROM THE RECORDING — the following lines were aligned to the actual audio.",
       "When any of these lines appears in the lyrics, output it character-for-character as",
       "written here (same chords, same bracket positions) — never your own version of it:",
       "",
-    ], alignedLines, [
-      "",
-      "These measured lines reveal the song's true chord pattern. Sections parallel to them",
-      "(other verses, other choruses, repeats of the same melody) MUST follow the same chord",
-      "pattern at the same lyrical positions. Do not simplify or substitute.",
-      "",
-    ]);
+    ], alignedLines.lines.slice(0, 60), closing);
   }
 
   var systemPrompt, userPrompt;
@@ -768,9 +796,16 @@ async function fetchChartFromAudioAnalysis(title, artist, releaseDate, realLyric
     if (lrcLines.length >= 4) {
       var offset = await locateClipInSong(detectedChords.vocalsUrl, lrcLines);
       if (offset !== null) {
-        alignedLines = buildAlignedChordPro(detectedChords.timeline, detectedChords.clipDuration, offset, lrcLines);
-        console.log("Align: " + (alignedLines ? alignedLines.length + " lines measured from the recording" : "not enough covered lines"));
-        if (alignedLines) alignedLines.forEach(function (l) { console.log("Align measured | " + l); });
+        var measured = buildAlignedChordPro(detectedChords.timeline, detectedChords.clipDuration, offset, lrcLines);
+        if (measured) {
+          var lrcWithText = lrcLines.filter(function (l) { return l.text; }).length;
+          alignedLines = {
+            lines: measured,
+            highCoverage: lrcWithText > 0 && measured.length / lrcWithText >= 0.6,
+          };
+        }
+        console.log("Align: " + (measured ? measured.length + " lines measured (coverage " + (alignedLines.highCoverage ? "HIGH" : "partial") + ")" : "not enough covered lines"));
+        if (measured) measured.forEach(function (l) { console.log("Align measured | " + l); });
       }
     }
   }
@@ -1155,17 +1190,24 @@ async function fetchHtml(url) {
 //   "ultimate_guitar", "cifraclub", "echords", "audio_analysis", "ai_generated"
 
 async function fetchChartFromSources(title, artist, releaseDate) {
-  console.log("Sources: trying Ultimate-Guitar for", title, "by", artist);
-  var chart = await fetchChartFromUG(title, artist);
-  if (chart) return { chart: chart, source: "ultimate_guitar" };
+  // SKIP_SCRAPERS=1 forces the audio-analysis path — used when testing the
+  // pipeline against songs the chord sites already cover.
+  var chart;
+  if (process.env.SKIP_SCRAPERS === "1") {
+    console.log("Sources: SKIP_SCRAPERS set — going straight to audio analysis");
+  } else {
+    console.log("Sources: trying Ultimate-Guitar for", title, "by", artist);
+    chart = await fetchChartFromUG(title, artist);
+    if (chart) return { chart: chart, source: "ultimate_guitar" };
 
-  console.log("Sources: trying Cifra Club for", title, "by", artist);
-  chart = await fetchChartFromCifra(title, artist);
-  if (chart) return { chart: chart, source: "cifraclub" };
+    console.log("Sources: trying Cifra Club for", title, "by", artist);
+    chart = await fetchChartFromCifra(title, artist);
+    if (chart) return { chart: chart, source: "cifraclub" };
 
-  console.log("Sources: trying e-chords for", title, "by", artist);
-  chart = await fetchChartFromEchords(title, artist);
-  if (chart) return { chart: chart, source: "echords" };
+    console.log("Sources: trying e-chords for", title, "by", artist);
+    chart = await fetchChartFromEchords(title, artist);
+    if (chart) return { chart: chart, source: "echords" };
+  }
 
   // No human-curated source had it — gather lyrics + key/tempo once, shared
   // by both the audio-analysis attempt and the final AI fallback.
@@ -1383,4 +1425,11 @@ app.post("/transcribe", rateLimit("transcribe", 50), async function(req, res) {
   }
 });
 
-app.listen(port, function() { console.log("Server started on port " + port); });
+if (require.main === module) {
+  app.listen(port, function() { console.log("Server started on port " + port); });
+}
+
+// exposed for test scripts only — `node server.js` is the real entry point
+module.exports = {
+  _internals: { generateChartWithAI, fetchChartFromAudioAnalysis, fetchChartFromSources, fetchRealLyrics, saveChartToDB },
+};

@@ -60,7 +60,7 @@ User records snippet / searches song
 
 ### Legal considerations / open risks (not yet resolved)
 
-- YouTube audio extraction is a ToS violation — Chordify operates this way regardless, but it's a known risk, not a cleared one.
+- YouTube audio extraction is a ToS violation — Chordify operates this way regardless, but it's a known risk, not a cleared one. **Decision (June 2026, Rares):** full-song YouTube analysis is LIVE (`downloadFullSong` in audioAnalysis.js; yt-dlp installed via brew locally and nixpacks.toml on Railway). The 30s iTunes preview path remains the automatic fallback when YouTube blocks the server's IP.
 - The existing UG scraping in `fetchChartFromUG` is **also** a ToS violation — newly identified risk in the current backend, not introduced by the new pipeline.
 - Lyrics require licensing: Musixmatch has publisher deals; Genius/lrclib are legal gray areas.
 - Chord progressions themselves are not copyrightable — lower risk than lyrics/audio.

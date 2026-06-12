@@ -1,0 +1,5 @@
+# Railway build config. yt-dlp powers the full-song audio analysis
+# (audioAnalysis.js downloadFullSong); without it the pipeline silently
+# falls back to 30s iTunes previews.
+[phases.setup]
+nixPkgs = ["...", "yt-dlp"]
