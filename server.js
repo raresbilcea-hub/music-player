@@ -174,21 +174,35 @@ function normalizeForLookup(s) {
 
 // ─── Lyrics fetching (lrclib /get → lrclib /search → lyrics.ovh) ────────────
 
+// All lyric fetchers return { plain, synced } — synced is the raw LRC text
+// ("[00:17.55] Old pirates...") when the source has it, else null. The
+// synced timestamps drive the chord-to-lyric alignment in the audio
+// pipeline; plain text remains the "VERIFIED LYRICS" block for the LLM.
+
 async function lrclibGet(title, artist) {
-  try {
-    var params = "artist_name=" + encodeURIComponent(artist) + "&track_name=" + encodeURIComponent(title);
-    var res = await axios.get("https://lrclib.net/api/get?" + params, { timeout: 6000 });
-    if (res.data && res.data.plainLyrics && res.data.plainLyrics.trim().length > 80) {
-      return res.data.plainLyrics.trim();
+  // lrclib is the only source of time-stamped lyrics (which drive chord
+  // alignment), so it gets a generous timeout and one retry — a transient
+  // slow response here would silently degrade the whole chart.
+  var params = "artist_name=" + encodeURIComponent(artist) + "&track_name=" + encodeURIComponent(title);
+  for (var attempt = 1; attempt <= 2; attempt++) {
+    try {
+      var res = await axios.get("https://lrclib.net/api/get?" + params, { timeout: 12000 });
+      if (res.data && res.data.plainLyrics && res.data.plainLyrics.trim().length > 80) {
+        return { plain: res.data.plainLyrics.trim(), synced: res.data.syncedLyrics || null };
+      }
+      return null; // real 200 without usable lyrics — no point retrying
+    } catch(e) {
+      if (e.response && e.response.status === 404) return null; // not found is normal
+      console.log("lrclib /get attempt " + attempt + " failed: " + e.message);
     }
-  } catch(e) { /* 404 is normal */ }
+  }
   return null;
 }
 
 async function lrclibSearch(title, artist) {
   try {
     var q = "q=" + encodeURIComponent(title + " " + artist);
-    var res = await axios.get("https://lrclib.net/api/search?" + q, { timeout: 6000 });
+    var res = await axios.get("https://lrclib.net/api/search?" + q, { timeout: 12000 });
     var hits = Array.isArray(res.data) ? res.data : [];
     var nT = normalizeForLookup(title).toLowerCase();
     var nA = normalizeForLookup(artist).toLowerCase().split(" ")[0]; // first artist word
@@ -200,11 +214,11 @@ async function lrclibSearch(title, artist) {
       var hA = String(h.artistName || "").toLowerCase();
       var titleOk  = hT.indexOf(nT) !== -1 || nT.indexOf(hT) !== -1;
       var artistOk = nA && (hA.indexOf(nA) !== -1 || nA.indexOf(hA.split(" ")[0]) !== -1);
-      if (titleOk && artistOk) return h.plainLyrics.trim();
+      if (titleOk && artistOk) return { plain: h.plainLyrics.trim(), synced: h.syncedLyrics || null };
     }
     // No good match, fall back to top hit if it has substantial lyrics
     if (hits[0] && hits[0].plainLyrics && hits[0].plainLyrics.trim().length > 200) {
-      return hits[0].plainLyrics.trim();
+      return { plain: hits[0].plainLyrics.trim(), synced: hits[0].syncedLyrics || null };
     }
   } catch(e) { console.log("lrclib /search error:", e.message); }
   return null;
@@ -216,7 +230,7 @@ async function fetchLyricsFromOVH(title, artist) {
     var res = await axios.get(url, { timeout: 6000 });
     // 200-char floor — lyrics.ovh sometimes returns truncated junk
     if (res.data && res.data.lyrics && res.data.lyrics.trim().length > 200) {
-      return res.data.lyrics.trim();
+      return { plain: res.data.lyrics.trim(), synced: null };
     }
   } catch(e) { /* 404 is normal */ }
   return null;
@@ -228,21 +242,21 @@ async function fetchRealLyrics(rawTitle, rawArtist) {
 
   console.log("Lyrics: lrclib /get normalized -> '" + title + "' / '" + artist + "'");
   var l = await lrclibGet(title, artist);
-  if (l) { console.log("Lyrics: lrclib /get hit (" + l.length + " chars)"); return l; }
+  if (l) { console.log("Lyrics: lrclib /get hit (" + l.plain.length + " chars, synced: " + !!l.synced + ")"); return l; }
 
   if (rawTitle !== title || rawArtist !== artist) {
     console.log("Lyrics: lrclib /get raw -> '" + rawTitle + "' / '" + rawArtist + "'");
     l = await lrclibGet(rawTitle, rawArtist);
-    if (l) { console.log("Lyrics: lrclib /get raw hit (" + l.length + " chars)"); return l; }
+    if (l) { console.log("Lyrics: lrclib /get raw hit (" + l.plain.length + " chars, synced: " + !!l.synced + ")"); return l; }
   }
 
   console.log("Lyrics: lrclib /search...");
   l = await lrclibSearch(title, artist);
-  if (l) { console.log("Lyrics: lrclib /search hit (" + l.length + " chars)"); return l; }
+  if (l) { console.log("Lyrics: lrclib /search hit (" + l.plain.length + " chars, synced: " + !!l.synced + ")"); return l; }
 
   console.log("Lyrics: lyrics.ovh...");
   l = await fetchLyricsFromOVH(title, artist);
-  if (l) { console.log("Lyrics: lyrics.ovh hit (" + l.length + " chars)"); return l; }
+  if (l) { console.log("Lyrics: lyrics.ovh hit (" + l.plain.length + " chars)"); return l; }
 
   console.log("Lyrics: not found — AI will recall from training data");
   return null;
@@ -353,9 +367,9 @@ function validateAndRepairChart(chart) {
 
 // ─── Chart generation ─────────────────────────────────────────────────────────
 
-async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spotifyTempo, realLyrics, detectedChords) {
+async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spotifyTempo, realLyrics, detectedChords, alignedLines) {
   var keyInfo = spotifyKey
-    ? "Confirmed musical key: " + spotifyKey + " (Spotify audio analysis)."
+    ? "Confirmed musical key: " + spotifyKey + " (measured from the recording)."
     : "Identify the exact musical key from your training data.";
   var tempoInfo = spotifyTempo ? " Tempo: " + spotifyTempo + " BPM (Spotify)." : "";
 
@@ -412,6 +426,24 @@ async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spoti
       "This takes priority over your own recollection of the song's chords if they conflict.",
       "",
     ];
+  }
+
+  // Lines whose chord placements were MEASURED by aligning the chord
+  // timeline with time-stamped lyrics — the model must reproduce these
+  // verbatim and pattern-match the rest of the song to them.
+  if (alignedLines && alignedLines.length > 0) {
+    detectedChordsLines = detectedChordsLines.concat([
+      "MEASURED FROM THE RECORDING — the following lines were aligned to the actual audio.",
+      "When any of these lines appears in the lyrics, output it character-for-character as",
+      "written here (same chords, same bracket positions) — never your own version of it:",
+      "",
+    ], alignedLines, [
+      "",
+      "These measured lines reveal the song's true chord pattern. Sections parallel to them",
+      "(other verses, other choruses, repeats of the same melody) MUST follow the same chord",
+      "pattern at the same lyrical positions. Do not simplify or substitute.",
+      "",
+    ]);
   }
 
   var systemPrompt, userPrompt;
@@ -524,11 +556,196 @@ async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spoti
   return validateAndRepairChart(chart);
 }
 
+// ─── Chord-to-lyric alignment ─────────────────────────────────────────────────
+// The chord timeline knows WHEN each chord sounds (clip-relative seconds);
+// synced lyrics know WHEN each line is sung (song-absolute seconds). The
+// missing link is the clip's offset within the song — recovered by Whisper-
+// transcribing the clip's vocals stem and matching the words against the
+// synced lyrics. With the offset known, chord placements for the covered
+// lines are computed arithmetically instead of guessed by the LLM.
+
+function parseLrc(synced) {
+  var lines = [];
+  String(synced || "").split(/\r?\n/).forEach(function (raw) {
+    var m = raw.match(/^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)$/);
+    if (!m) return;
+    var t = parseInt(m[1], 10) * 60 + parseFloat(m[2]);
+    lines.push({ t: t, text: m[3].trim() });
+  });
+  return lines;
+}
+
+function alignTokens(s) {
+  return String(s || "").toLowerCase().replace(/[^a-z0-9' ]+/g, " ").split(/\s+/).filter(Boolean);
+}
+
+function tokenDice(a, b) {
+  if (a.length === 0 || b.length === 0) return 0;
+  var setB = {};
+  b.forEach(function (w) { setB[w] = (setB[w] || 0) + 1; });
+  var hits = 0;
+  a.forEach(function (w) { if (setB[w] > 0) { hits++; setB[w]--; } });
+  return (2 * hits) / (a.length + b.length);
+}
+
+// Whisper-transcribe the vocals stem and locate the clip in the song.
+// Returns offset in seconds (song time = clip time + offset) or null.
+async function locateClipInSong(vocalsUrl, lrcLines) {
+  var tempPath = path.join(os.tmpdir(), "align_vocals_" + Date.now() + ".mp3");
+  try {
+    var res = await axios.get(vocalsUrl, { responseType: "arraybuffer" });
+    fs.writeFileSync(tempPath, Buffer.from(res.data));
+
+    var tr = await openai.audio.transcriptions.create({
+      file:            fs.createReadStream(tempPath),
+      model:           "whisper-1",
+      response_format: "verbose_json",
+    });
+    var segments = tr.segments || [];
+    console.log("Align: Whisper heard " + segments.length + " segments in the vocals stem");
+
+    // Every (segment, lyric-line) pair with decent word overlap implies a
+    // candidate offset. Songs repeat lines, so candidates can point at the
+    // wrong copy of a line — instead of demanding raw agreement, score each
+    // candidate offset by how many segments find a matching lyric line at
+    // the position that offset predicts, and keep the best-supported one.
+    var usable = segments.filter(function (seg) { return alignTokens(seg.text).length >= 3; });
+    var candidates = [];   // offsets implied by any decent (segment, line) match
+    var anchors = [];      // high-confidence matches against UNIQUE lyric lines
+    var lineTextCounts = {};
+    lrcLines.forEach(function (line) {
+      var key = alignTokens(line.text).join(" ");
+      if (key) lineTextCounts[key] = (lineTextCounts[key] || 0) + 1;
+    });
+    usable.forEach(function (seg) {
+      var segTokens = alignTokens(seg.text);
+      lrcLines.forEach(function (line) {
+        var lineTokens = alignTokens(line.text);
+        var score = tokenDice(segTokens, lineTokens);
+        if (score >= 0.5) candidates.push(line.t - seg.start);
+        // An anchor: near-verbatim match on a line whose text appears exactly
+        // once in the song — it cannot be confused with a repeated chorus
+        // line, so a single one is enough to fix the offset.
+        if (score >= 0.7 && lineTokens.length >= 6 && lineTextCounts[lineTokens.join(" ")] === 1) {
+          anchors.push({ offset: line.t - seg.start, score: score });
+        }
+      });
+    });
+    if (candidates.length === 0) {
+      console.log("Align: no confident lyric matches — skipping alignment");
+      return null;
+    }
+
+    var best = null;
+    candidates.forEach(function (cand) {
+      var implied = [], totalScore = 0;
+      usable.forEach(function (seg) {
+        var segTokens = alignTokens(seg.text);
+        var predicted = seg.start + cand;
+        lrcLines.forEach(function (line) {
+          if (Math.abs(line.t - predicted) > 2.5) return;
+          var score = tokenDice(segTokens, alignTokens(line.text));
+          if (score >= 0.4) { implied.push(line.t - seg.start); totalScore += score; }
+        });
+      });
+      if (!best || implied.length > best.implied.length ||
+          (implied.length === best.implied.length && totalScore > best.totalScore)) {
+        best = { offset: cand, implied: implied, totalScore: totalScore };
+      }
+    });
+
+    if (!best || best.implied.length < 2) {
+      // Fall back to a single near-verbatim match on a unique lyric line.
+      if (anchors.length > 0) {
+        anchors.sort(function (a, b) { return b.score - a.score; });
+        console.log("Align: clip sits at " + anchors[0].offset.toFixed(1) + "s into the song (single unique-line anchor, score " + anchors[0].score.toFixed(2) + ")");
+        return anchors[0].offset;
+      }
+      console.log("Align: no offset supported by 2+ segments (candidates: " + candidates.map(function (c) { return c.toFixed(1); }).join(", ") + ") — skipping");
+      return null;
+    }
+    var offset = best.implied.reduce(function (s, o) { return s + o; }, 0) / best.implied.length;
+    console.log("Align: clip sits at " + offset.toFixed(1) + "s into the song (" + best.implied.length + "/" + usable.length + " segments support it)");
+    return offset;
+  } catch (e) {
+    console.log("Align: failed (" + e.message + ") — skipping alignment");
+    return null;
+  } finally {
+    try { fs.unlinkSync(tempPath); } catch (_) {}
+  }
+}
+
+// Place chords on the lyric lines covered by the clip. Returns an array of
+// ChordPro strings ("[G]Old pirates, yes, they [Em]rob I") or null.
+function buildAlignedChordPro(timeline, clipDuration, offset, lrcLines) {
+  var clipStart = offset, clipEnd = offset + clipDuration;
+  var out = [];
+
+  for (var i = 0; i < lrcLines.length; i++) {
+    var line = lrcLines[i];
+    if (!line.text) continue;
+    var lineStart = line.t;
+    var lineEnd = (i + 1 < lrcLines.length) ? lrcLines[i + 1].t : lineStart + 8;
+    // Only lines fully inside the clip window — partial coverage means
+    // chords could be missing from the edges of the line.
+    if (lineStart < clipStart + 0.5 || lineEnd > clipEnd) continue;
+
+    var events = []; // { position, chord }
+    var soundingAtStart = null;
+    timeline.forEach(function (seg) {
+      var absTime = seg.time + offset;
+      if (absTime <= lineStart && absTime + seg.duration > lineStart) soundingAtStart = seg.chord;
+      if (absTime > lineStart && absTime < lineEnd) {
+        var frac = (absTime - lineStart) / (lineEnd - lineStart);
+        events.push({ position: Math.round(frac * line.text.length), chord: seg.chord });
+      }
+    });
+    if (soundingAtStart) events.unshift({ position: 0, chord: soundingAtStart });
+    if (events.length === 0) continue;
+
+    // If chords change faster than ~1.2s within this line, the detector is
+    // mushing through a transition (or hearing passing tones) — trust only
+    // the chord sounding at the line start rather than teach the LLM noise.
+    var lineDur = lineEnd - lineStart;
+    if (events.length > 1 && lineDur / events.length < 1.2) {
+      events = events.slice(0, 1);
+    }
+
+    // Chords belong at word starts; snap each position back to the start of
+    // the word it lands in, then drop duplicates that collide.
+    var text = line.text;
+    var seen = {};
+    var snapped = [];
+    events.forEach(function (ev) {
+      var pos = Math.min(Math.max(ev.position, 0), text.length);
+      if (pos > 0 && pos < text.length) {
+        pos = text.lastIndexOf(" ", pos - 1) + 1;
+      }
+      if (seen[pos]) return;
+      var prev = snapped[snapped.length - 1];
+      if (prev && prev.chord === ev.chord) return;
+      seen[pos] = true;
+      snapped.push({ position: pos, chord: ev.chord });
+    });
+
+    var result = "", cursor = 0;
+    snapped.forEach(function (ev) {
+      result += text.slice(cursor, ev.position) + "[" + ev.chord + "]";
+      cursor = ev.position;
+    });
+    result += text.slice(cursor);
+    out.push(result);
+  }
+  return out.length >= 3 ? out : null;
+}
+
 // Real audio-based chord detection: Demucs (Replicate) isolates a guitar
 // stem from a 30s iTunes preview, essentia.js detects chords from it, and
 // the AI is constrained to those real chords when placing them against
-// lyrics/structure. Returns null if any stage doesn't yield enough signal,
-// so the caller can fall back to plain AI recall.
+// lyrics/structure. When synced lyrics exist, chord placements for the
+// lines the clip covers are measured (Whisper-anchored) rather than
+// guessed. Returns null if any stage doesn't yield enough signal, so the
+// caller can fall back to plain AI recall.
 async function fetchChartFromAudioAnalysis(title, artist, releaseDate, realLyrics, spotifyKey, spotifyTempo) {
   var detectedChords = await analyzeAudioForChords(title, artist);
   if (!detectedChords) return null;
@@ -537,7 +754,21 @@ async function fetchChartFromAudioAnalysis(title, artist, releaseDate, realLyric
   // Spotify's key endpoint is gone (403), so the key heard in the actual
   // recording is our best "confirmed key" for the prompt's key enforcement.
   var confirmedKey = spotifyKey || detectedChords.key || null;
-  var chart = await generateChartWithAI(title, artist, releaseDate, confirmedKey, spotifyTempo, realLyrics, detectedChords);
+
+  var alignedLines = null;
+  if (realLyrics && realLyrics.synced && detectedChords.vocalsUrl && detectedChords.timeline) {
+    var lrcLines = parseLrc(realLyrics.synced);
+    if (lrcLines.length >= 4) {
+      var offset = await locateClipInSong(detectedChords.vocalsUrl, lrcLines);
+      if (offset !== null) {
+        alignedLines = buildAlignedChordPro(detectedChords.timeline, detectedChords.clipDuration, offset, lrcLines);
+        console.log("Align: " + (alignedLines ? alignedLines.length + " lines measured from the recording" : "not enough covered lines"));
+        if (alignedLines) alignedLines.forEach(function (l) { console.log("Align measured | " + l); });
+      }
+    }
+  }
+
+  var chart = await generateChartWithAI(title, artist, releaseDate, confirmedKey, spotifyTempo, realLyrics ? realLyrics.plain : null, detectedChords, alignedLines);
   return { chart: chart, source: "audio_analysis" };
 }
 
@@ -947,7 +1178,7 @@ async function fetchChartFromSources(title, artist, releaseDate) {
 
   // Last resort — LLM with our existing lyrics + Spotify pipeline
   console.log("Sources: falling back to plain AI generation");
-  chart = await generateChartWithAI(title, artist, releaseDate || null, spotifyResult.spotifyKey, spotifyResult.spotifyTempo, lyricsResult);
+  chart = await generateChartWithAI(title, artist, releaseDate || null, spotifyResult.spotifyKey, spotifyResult.spotifyTempo, lyricsResult ? lyricsResult.plain : null);
   return { chart: chart, source: "ai_generated" };
 }
 

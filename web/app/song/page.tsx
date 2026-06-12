@@ -33,6 +33,7 @@ function SongPageInner() {
   const [draft, setDraft] = useState<ChordChart | null>(null);
   const [editTarget, setEditTarget] = useState<ChordTarget | null>(null);
   const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
     if (!title || !artist) {
@@ -74,14 +75,17 @@ function SongPageInner() {
   const startEdit = useCallback(() => {
     if (!chart) return;
     setDraft(structuredClone(chart));
+    setDirty(false);
     setEditMode(true);
   }, [chart]);
 
   const cancelEdit = useCallback(() => {
+    if (dirty && !window.confirm("Throw away your chord changes without saving?")) return;
     setEditMode(false);
     setDraft(null);
     setEditTarget(null);
-  }, []);
+    setDirty(false);
+  }, [dirty]);
 
   const applyChordEdit = useCallback(
     (chordName: string) => {
@@ -97,6 +101,7 @@ function SongPageInner() {
         }
       }
       setDraft(next);
+      setDirty(true);
       setEditTarget(null);
     },
     [draft, editTarget]
@@ -108,6 +113,7 @@ function SongPageInner() {
     const line = next.sections[editTarget.sectionIndex]?.lines[editTarget.lineIndex];
     if (line?.chords) line.chords.splice(editTarget.chordIndex, 1);
     setDraft(next);
+    setDirty(true);
     setEditTarget(null);
   }, [draft, editTarget]);
 
@@ -126,6 +132,7 @@ function SongPageInner() {
       setChart({ ...draft, verified: true });
       setEditMode(false);
       setDraft(null);
+      setDirty(false);
     } catch (e) {
       alert(e instanceof Error ? e.message : "Could not save your corrections.");
     } finally {
@@ -191,8 +198,9 @@ function SongPageInner() {
 
       {editMode && (
         <p className={`${styles.editBanner} no-print`}>
-          Tap a chord to change or remove it. Tap anywhere in the lyrics to add
-          a chord at that spot.
+          {dirty
+            ? "⚠️ You have unsaved changes — press “Save chart” above to keep them!"
+            : "Tap a chord to change or remove it. Tap anywhere in the lyrics to add a chord at that spot."}
         </p>
       )}
 

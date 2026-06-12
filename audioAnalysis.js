@@ -399,6 +399,11 @@ async function analyzeAudioForChords(title, artist) {
           chords: summary.vocabulary,
           progression: summary.progression,
           key: detectedKey,
+          // clip-relative [{ chord, time, duration }], noise chords removed
+          // so alignment can't place a chord the vocabulary rejected
+          timeline: timeline.filter(function (s) { return summary.vocabulary.indexOf(s.chord) !== -1; }),
+          clipDuration: raw.clipDuration,
+          vocalsUrl: stems.vocals || null, // for Whisper-based lyric alignment
           sourceClip: "itunes_preview_30s",
         };
       }
