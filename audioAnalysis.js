@@ -41,13 +41,49 @@ const MAX_VOCAB_SIZE = 6;
 const MAX_PROGRESSION_LENGTH = 16;
 const NO_CHORD_LABEL = "N";       // essentia's "no chord / silence" label
 
+function normalizeForMatch(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/\s*[\(\[].*?[\)\]]/g, "")  // drop "(Band Version)", "[Remastered]"
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function artistLooselyMatches(a, b) {
+  var na = normalizeForMatch(a).replace(/\s*(feat|featuring|with|and|x)\s+.*$/, "").trim();
+  var nb = normalizeForMatch(b).replace(/\s*(feat|featuring|with|and|x)\s+.*$/, "").trim();
+  if (!na || !nb) return false;
+  return na === nb || na.indexOf(nb) !== -1 || nb.indexOf(na) !== -1;
+}
+
 async function findItunesPreview(title, artist) {
   try {
-    var url = "https://itunes.apple.com/search?term=" + encodeURIComponent(title + " " + artist) + "&entity=song&limit=1";
+    var url = "https://itunes.apple.com/search?term=" + encodeURIComponent(title + " " + artist) + "&entity=song&limit=10";
     var res = await axios.get(url);
-    var results = res.data.results;
-    if (!results || results.length === 0) return null;
-    return results[0].previewUrl || null;
+    var results = res.data.results || [];
+
+    // iTunes ranks by popularity/promotion, not relevance — the first hit
+    // can be a totally different song (observed: searching "Redemption Song
+    // Bob Marley" returned a new Jessie Reyez collab first). Only accept a
+    // result whose title AND artist actually match what we asked for.
+    var wantTitle = normalizeForMatch(title);
+    var match = results.find(function (r) {
+      return normalizeForMatch(r.trackName) === wantTitle && artistLooselyMatches(r.artistName, artist) && r.previewUrl;
+    });
+    // Fall back to a prefix title match ("Redemption Song" vs a version-tagged
+    // release) before giving up.
+    if (!match) {
+      match = results.find(function (r) {
+        var t = normalizeForMatch(r.trackName);
+        return (t.indexOf(wantTitle) === 0 || wantTitle.indexOf(t) === 0) && artistLooselyMatches(r.artistName, artist) && r.previewUrl;
+      });
+    }
+    if (!match) {
+      console.log("audioAnalysis: no iTunes result matched '" + title + "' by '" + artist + "'");
+      return null;
+    }
+    console.log("audioAnalysis: using iTunes preview '" + match.trackName + "' by '" + match.artistName + "' (" + (match.collectionName || "single") + ")");
+    return match.previewUrl;
   } catch (e) {
     console.log("audioAnalysis: iTunes preview lookup failed:", e.message);
     return null;
