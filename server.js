@@ -286,7 +286,14 @@ function parseChordPro(text) {
     while (i < rawLine.length) {
       if (rawLine[i] === "[") {
         var end = rawLine.indexOf("]", i);
-        if (end === -1) { lyrics += rawLine.substring(i); break; }
+        if (end === -1) {
+          // Unterminated bracket. If the rest looks like a chord fragment
+          // the model forgot to close ("[A", "[Em7"), drop it rather than
+          // leak it into the lyrics; otherwise keep the text as-is.
+          var rest = rawLine.substring(i);
+          if (!/^\[[A-G][#b]?[A-Za-z0-9\/]*\s*$/.test(rest)) lyrics += rest;
+          break;
+        }
         var chord = rawLine.substring(i + 1, end).trim();
         if (chord) chords.push({ chord: chord, position: lyrics.length });
         i = end + 1;
