@@ -58,6 +58,37 @@ User records snippet / searches song
 - Chord fretboard diagrams with finger positions (already built — `ChordDiagram.tsx` / `ChordPreview`).
 - Static, printable charts; works offline once generated.
 
+### ✅ Current status (June 11, 2026 — end of the build sprint)
+
+**Phase 1 (MVP) is functionally complete and LIVE.** Rares verified chord accuracy by ear on Stockholmsvy and Redemption Song ("totally correct"). Next gate per the plan: validate with ~20 working musicians for ~a month before building accounts/payments.
+
+**Live URLs**
+- Website (Vercel, Root Directory = `web`, env `NEXT_PUBLIC_API_URL`): https://music-player-mocha-five.vercel.app
+- Backend (Railway, deploys on push to master): https://music-player-production-524a.up.railway.app — `GET /` returns config-presence booleans (replicate/openai/supabase/audd/spotify) for diagnosing missing env vars.
+- Both Vercel and Railway deploy automatically on `git push origin master`. Supabase free tier pauses after ~1 week idle (DNS stops resolving → "fetch failed"); Railway can lapse too — check both dashboards first if everything 404s after a break.
+
+**Chart source ladder (fetchChartFromSources, server.js)** — each rung only runs if the one above fails:
+1. Supabase cache — verified (musician-corrected) charts always win; artist matching is loose ("Hannes" finds "Hannes & waterbaby", "Bob Marley" finds "Bob Marley & The Wailers").
+2. Human chord sites: Ultimate-Guitar → Cifra Club → e-chords. Their 403s are *intermittent* bot-blocking, not permanent — they may answer an hour later. Catalogs are deep (even Swedish indie singles).
+3. **Audio analysis** (audioAnalysis.js): full song from YouTube via yt-dlp (`downloadFullSong`, title/artist-verified against the video title) → Demucs htdemucs_6s on Replicate (omit `stem` → all 6 stems; inputs >1MB via Replicate Files API, not data URIs) → essentia KeyExtractor (full mix) + HPCP/ChordsDetection (guitar stem, fallback "other") → key-aware vocabulary filter (diatonic ≥4% of clip, out-of-key ≥15%) → Whisper on the vocals stem locates the audio against lrclib synced lyrics → chord placements COMPUTED per lyric line (word-snapped; lines with >1 chord per 1.2s reduced to their first chord) → GPT-4o only reproduces measured lines verbatim and labels sections. 30s iTunes preview is the automatic fallback when YouTube fails.
+4. AI recall (`generateChartWithAI` without measured data) — last resort only.
+
+**Env/tooling facts that cost debugging sessions — don't relearn them:**
+- Spotify's audio-analysis API is dead (403 for new apps) — key comes from essentia now; `lookupSpotifyKey` is vestigial.
+- iTunes Search ranks by promotion, not relevance — never trust result[0] without a title/artist match (a Jessie Reyez collab once got analyzed as "Redemption Song").
+- yt-dlp: brew binary locally (`/opt/homebrew/bin/yt-dlp`), nixpacks.toml provides it on Railway; the npm youtube-dl-exec zipapp needs Python ≥3.10 (Mac system python is 3.9 — insufficient).
+- `SKIP_SCRAPERS=1 node server.js` forces the audio-analysis path for testing (scrapers otherwise answer first for most songs).
+- lrclib is the only synced-lyrics source → 12s timeout + one retry; a silent timeout degrades charts badly.
+- Never `force`-regenerate a chart whose DB row has `verified: true` — POST /chords force upserts and would clobber a musician's correction.
+- Test scripts: `test-demucs.js`, `test-chords.js` (standalone pipeline stages); `audioAnalysis.js` exports `_internals` for harnesses.
+
+**Known open items:**
+- Chord positions land near, not exactly on, the syllable where the change happens (Rares: acceptable for now; word-snapping precision could improve).
+- UG-scraped charts carry formatting junk (squished chord-only rows, tab notation as lyrics, transpose instructions as verse text) — cleanup task chip exists.
+- One-chord-vamp clips can under-represent songs (Three Little Birds got A-only from the 30s path before full-song existed) — task chip exists; full-song coverage mostly obsoletes it.
+- Whether YouTube allows downloads from Railway's IP is UNVERIFIED — every live test was intercepted by a human chord site first. First uncovered song in production will tell (check Railway logs for "downloading full song" vs "falling back to preview").
+- The Expo app (MusicPlayer20/) still exists but is deprioritized; its chord-shape library and chart-rendering logic were ported to `web/`.
+
 ### Legal considerations / open risks (not yet resolved)
 
 - YouTube audio extraction is a ToS violation — Chordify operates this way regardless, but it's a known risk, not a cleared one. **Decision (June 2026, Rares):** full-song YouTube analysis is LIVE (`downloadFullSong` in audioAnalysis.js; yt-dlp installed via brew locally and nixpacks.toml on Railway). The 30s iTunes preview path remains the automatic fallback when YouTube blocks the server's IP.
