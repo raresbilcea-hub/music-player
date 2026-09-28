@@ -8,6 +8,12 @@ const API_URL =
   process.env.NEXT_PUBLIC_API_URL ||
   "https://music-player-production-524a.up.railway.app";
 
+class HttpError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
 export type SearchSong = {
   title: string;
   artist: string;
@@ -48,7 +54,10 @@ export async function generateChart(
   });
   if (!res.ok) {
     const body = await res.json().catch(() => null);
-    throw new Error(body?.error || `Chart generation failed (${res.status})`);
+    throw new HttpError(
+      body?.error || `Chart generation failed (${res.status})`,
+      res.status
+    );
   }
   const data = await res.json();
   return data.chart as ChordChart;
@@ -68,7 +77,10 @@ export async function generateChartWithFallback(
   const maxPollMs = opts.maxPollMs ?? 5 * 60_000;
   try {
     return await generateChart(title, artist);
-  } catch {
+  } catch (error) {
+    if (error instanceof HttpError && error.status >= 400 && error.status < 500) {
+      throw error;
+    }
     const deadline = Date.now() + maxPollMs;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, pollIntervalMs));
