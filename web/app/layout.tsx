@@ -1,5 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import { AuthProvider } from "../context/auth";
+import { AuthHeader } from "../components/AuthHeader";
 
 export const metadata: Metadata = {
   title: "Music Player 2.0 — Real chords for real musicians",
@@ -20,7 +22,12 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <AuthProvider>
+          <AuthHeader />
+          {children}
+        </AuthProvider>
+      </body>
     </html>
   );
 }

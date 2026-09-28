@@ -81,6 +81,7 @@ User records snippet / searches song
 - lrclib is the only synced-lyrics source → 12s timeout + one retry; a silent timeout degrades charts badly.
 - Never `force`-regenerate a chart whose DB row has `verified: true` — POST /chords force upserts and would clobber a musician's correction.
 - Test scripts: `test-demucs.js`, `test-chords.js` (standalone pipeline stages); `audioAnalysis.js` exports `_internals` for harnesses.
+- Local audio decomposition handoff: `tools/rares-audio-decomp/` was unpacked from `/Users/raresbilcea/Downloads/rares-audio-decomp.zip`. Use `npm run audio:decomp -- <audio-file> [--dur 30]` via `audioDecomp.js` for local experiments only. The bundled `.pb` model weights are ignored by git and are non-commercial; Essentia/MTG licensing must be cleared before any production wiring.
 
 **Known open items:**
 - Chord positions land near, not exactly on, the syllable where the change happens (Rares: acceptable for now; word-snapping precision could improve).
@@ -123,6 +124,7 @@ No build step, no test suite. All logic is in the single file `server.js`.
 | POST | `/chords` `{ title, artist, force? }` | Generate & cache; `force:true` bypasses cache and overwrites | 50/day/IP |
 | PUT | `/chords` `{ title, artist, sections, musicalKey, tempo, capo }` | Save user correction, marks `verified:true` | — |
 | POST | `/identify` `{ audioBase64, mimeType }` | AudD fingerprint → chord chart | 50/day/IP |
+| POST | `/deconstruct` `{ audioBase64, mimeType?, separate?, transcribe? }` | Uploaded-audio deconstruction JSON: capture gate, key, optional stems + harmonic timelines + optional Whisper lyrics | 20/day/IP |
 | POST | `/transcribe` `{ audioBase64, mimeType }` | Whisper transcription (any language) → `{ transcript, language }` | 50/day/IP |
 
 ## Rate limiting

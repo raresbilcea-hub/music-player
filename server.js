@@ -9,10 +9,10 @@ const { createClient } = require("@supabase/supabase-js");
 const fs   = require("fs");
 const path = require("path");
 const os   = require("os");
-const { analyzeAudioForChords } = require("./audioAnalysis");
+const { analyzeAudioForChords, analyzeUploadedAudio } = require("./audioAnalysis");
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
@@ -86,6 +86,37 @@ function artistsLooselyMatch(a, b) {
   return na === nb || na.indexOf(nb) !== -1 || nb.indexOf(na) !== -1;
 }
 
+function containsLyricsRefusal(text) {
+  var normalized = String(text || "")
+    .replace(/[’‘]/g, "'")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  if (!normalized) return false;
+  return [
+    /\b(?:i'm|i am) sorry\b.{0,180}\b(?:can't|cannot|unable to)\b.{0,120}\b(?:provide|share|reproduce|display|transcribe)\b/,
+    /\b(?:i|we) (?:can't|cannot|am unable to|are unable to) (?:provide|share|reproduce|display|transcribe)\b.{0,160}\b(?:lyrics?|copyrighted content)\b/,
+    /\b(?:lyrics?|full lyrics?|song lyrics?) (?:are|is) (?:unavailable|not available)\b/,
+    /\b(?:copyright(?:ed)?|policy)\b.{0,120}\b(?:can't|cannot|unable|not able)\b.{0,120}\b(?:lyrics?|content)\b/,
+  ].some(function (pattern) { return pattern.test(normalized); });
+}
+
+function chartContainsLyricsRefusal(chart) {
+  var sections = chart && Array.isArray(chart.sections) ? chart.sections : [];
+  var lyrics = [];
+  sections.forEach(function (section) {
+    var lines = section && Array.isArray(section.lines) ? section.lines : [];
+    lines.forEach(function (line) { lyrics.push(String(line && line.lyrics || "")); });
+  });
+  return containsLyricsRefusal(lyrics.join("\n"));
+}
+
+function lyricsUnavailableError() {
+  var error = new Error("Lyrics are unavailable for this song.");
+  error.code = "LYRICS_UNAVAILABLE";
+  return error;
+}
+
 async function fetchChartFromDB(title, artist) {
   var { data: rows } = await supabase
     .from("chord_charts")
@@ -103,8 +134,13 @@ async function fetchChartFromDB(title, artist) {
     return (b.play_count || 0) - (a.play_count || 0);
   });
   var r = candidates[0];
+  var chart = { title: r.title, artist: r.artist, musicalKey: r.musical_key, tempo: r.tempo, capo: r.capo, sections: r.sections, verified: r.verified, source: r.source };
+  if (chartContainsLyricsRefusal(chart)) {
+    console.warn("Ignoring cached chart containing a lyrics refusal for", r.title, "by", r.artist);
+    return null;
+  }
   await supabase.from("chord_charts").update({ play_count: (r.play_count || 0) + 1 }).eq("id", r.id);
-  return { title: r.title, artist: r.artist, musicalKey: r.musical_key, tempo: r.tempo, capo: r.capo, sections: r.sections, verified: r.verified, source: r.source };
+  return chart;
 }
 
 async function lookupSpotifyKey(title, artist) {
@@ -567,12 +603,22 @@ async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spoti
     ]
   });
 
-  var raw = completion.choices[0].message.content || completion.choices[0].message.refusal || "";
-  console.log("OpenAI: finish_reason:", completion.choices[0].finish_reason, "length:", raw.length);
+  var choice = completion.choices[0] || {};
+  var message = choice.message || {};
+  if (message.refusal || choice.finish_reason === "content_filter" || choice.finish_reason === "refusal") {
+    console.warn("OpenAI declined lyrics generation for", title, "by", artist);
+    throw lyricsUnavailableError();
+  }
+  var raw = message.content || "";
+  console.log("OpenAI: finish_reason:", choice.finish_reason, "length:", raw.length);
   if (!raw) throw new Error("OpenAI returned empty response");
 
   // Strip stray markdown fencing if the model wrapped its output
   raw = raw.replace(/^```[A-Za-z0-9_-]*\s*/m, "").replace(/```\s*$/m, "").trim();
+  if (containsLyricsRefusal(raw)) {
+    console.warn("OpenAI returned a lyrics refusal as content for", title, "by", artist);
+    throw lyricsUnavailableError();
+  }
 
   var sections = parseChordPro(raw);
   if (sections.length === 0) {
@@ -588,7 +634,9 @@ async function generateChartWithAI(title, artist, releaseDate, spotifyKey, spoti
     capo:       0,
     sections:   sections,
   };
-  return validateAndRepairChart(chart);
+  var cleanChart = validateAndRepairChart(chart);
+  if (chartContainsLyricsRefusal(cleanChart)) throw lyricsUnavailableError();
+  return cleanChart;
 }
 
 // ─── Chord-to-lyric alignment ─────────────────────────────────────────────────
@@ -815,6 +863,7 @@ async function fetchChartFromAudioAnalysis(title, artist, releaseDate, realLyric
 }
 
 async function saveChartToDB(chart, title, artist, source) {
+  if (chartContainsLyricsRefusal(chart)) throw lyricsUnavailableError();
   var saveResult = await supabase.from("chord_charts").upsert({
     title:       chart.title  || title,
     artist:      chart.artist || artist,
@@ -1306,63 +1355,233 @@ app.post("/chords", rateLimit("chords", 50), async function(req, res) {
     res.json({ found: true, fromDatabase: false, chart: result.chart, source: result.source });
   } catch(e) {
     console.error("POST /chords error:", e.message);
-    res.status(500).json({ error: e.message });
+    res.status(e.code === "LYRICS_UNAVAILABLE" ? 422 : 500).json({ error: e.message, code: e.code });
   }
 });
+
+var identifyChartRequests = new Map();
 
 app.post("/identify", rateLimit("identify", 50), async function(req, res) {
   try {
     var audioBase64 = req.body.audioBase64;
     var mimeType = req.body.mimeType;
-    if (!audioBase64) { return res.status(400).json({ error: "No audio provided" }); }
-    var audioBuffer = Buffer.from(audioBase64, "base64");
+    if (typeof audioBase64 !== "string" || !audioBase64.trim()) {
+      return res.status(400).json({ error: "No audio provided" });
+    }
+
+    var normalizedMime = typeof mimeType === "string"
+      ? mimeType.toLowerCase().split(";")[0].trim()
+      : "";
+    var audioExtensions = {
+      "audio/webm": "webm",
+      "audio/ogg": "ogg",
+      "audio/mp4": "mp4",
+      "audio/m4a": "m4a",
+      "audio/x-m4a": "m4a",
+      "audio/wav": "wav",
+      "audio/x-wav": "wav",
+      "audio/mpeg": "mp3",
+      "audio/mp3": "mp3",
+    };
+    var audioExtension = audioExtensions[normalizedMime];
+    if (!audioExtension) {
+      return res.status(415).json({
+        error: "Unsupported audio format. Use WebM, OGG, MP4/M4A, WAV, or MP3.",
+      });
+    }
+
+    var normalizedBase64 = audioBase64.replace(/\s/g, "");
+    if (
+      normalizedBase64.length % 4 !== 0 ||
+      !/^[A-Za-z0-9+/]*={0,2}$/.test(normalizedBase64)
+    ) {
+      return res.status(400).json({ error: "Invalid audio data" });
+    }
+
+    var maxIdentifyBytes = 5 * 1024 * 1024;
+    var base64Padding = normalizedBase64.endsWith("==")
+      ? 2
+      : (normalizedBase64.endsWith("=") ? 1 : 0);
+    var estimatedBytes = Math.floor(normalizedBase64.length * 3 / 4) - base64Padding;
+    if (estimatedBytes > maxIdentifyBytes) {
+      return res.status(413).json({ error: "Recording is too large. Please record a shorter clip." });
+    }
+
+    var audioBuffer = Buffer.from(normalizedBase64, "base64");
+    if (!audioBuffer.length) {
+      return res.status(400).json({ error: "No audio provided" });
+    }
+    if (audioBuffer.length > maxIdentifyBytes) {
+      return res.status(413).json({ error: "Recording is too large. Please record a shorter clip." });
+    }
+    if (!process.env.AUDD_API_KEY) {
+      console.error("AudD is not configured");
+      return res.status(503).json({
+        error: "Song identification is temporarily unavailable.",
+      });
+    }
 
     console.log("Step 1: Identifying with AudD...");
-    var songInfo = null;
+    var auddResponse;
     try {
       var form = new FormData();
       form.append("api_token", process.env.AUDD_API_KEY);
       form.append("return", "spotify,apple_music");
-      form.append("file", audioBuffer, { filename: "recording.m4a", contentType: mimeType || "audio/m4a" });
-      var auddResponse = await axios.post("https://api.audd.io/", form, { headers: form.getHeaders() });
-      if (auddResponse.data.result) {
-        songInfo = auddResponse.data.result;
-        console.log("Identified:", songInfo.title, "by", songInfo.artist);
-      } else {
-        console.log("Not identified by AudD");
-      }
-    } catch(e) { console.error("AudD error:", e.message); }
+      form.append("file", audioBuffer, {
+        filename: "recording." + audioExtension,
+        contentType: normalizedMime,
+      });
+      auddResponse = await axios.post("https://api.audd.io/", form, {
+        headers: form.getHeaders(),
+        timeout: 20 * 1000,
+      });
+    } catch(e) {
+      console.error("AudD provider error:", e.message);
+      var auddTimedOut = e.code === "ECONNABORTED" || e.code === "ETIMEDOUT";
+      return res.status(auddTimedOut ? 504 : 502).json({
+        error: auddTimedOut
+          ? "Song identification service timed out. Please try again."
+          : "Song identification service failed. Please try again.",
+      });
+    }
 
-    console.log("Step 2: Checking Supabase chord database...");
-    if (songInfo) {
-      try {
-        var cached = await fetchChartFromDB(songInfo.title, songInfo.artist);
-        if (cached) {
-          console.log("Returning from database!");
-          return res.json({ identified: true, fromDatabase: true, songInfo, chart: cached });
+    if (!auddResponse.data || auddResponse.data.status === "error") {
+      console.error("AudD provider error:", auddResponse.data && auddResponse.data.error);
+      return res.status(502).json({
+        error: "Song identification service failed. Please try again.",
+      });
+    }
+
+    var songInfo = auddResponse.data.result;
+    if (!songInfo) {
+      console.log("Not identified by AudD");
+      return res.json({ identified: false, songInfo: null });
+    }
+    console.log("Identified:", songInfo.title, "by", songInfo.artist);
+
+    var chartRequestKey = normalizeForLookup(songInfo.title).toLowerCase()
+      + "\u0000"
+      + normalizeForLookup(songInfo.artist).toLowerCase();
+    var chartRequest = identifyChartRequests.get(chartRequestKey);
+
+    if (!chartRequest) {
+      chartRequest = (async function() {
+        try {
+          console.log("Step 2: Checking Supabase chord database...");
+          try {
+            var cached = await fetchChartFromDB(songInfo.title, songInfo.artist);
+            if (cached) {
+              console.log("Returning from database!");
+              return { fromDatabase: true, chart: cached };
+            }
+          } catch(e) {
+            console.log("DB lookup error:", e.message);
+          }
+
+          console.log("Step 3: Looking up chord chart from real sources or AI...");
+          var result = await fetchChartFromSources(songInfo.title, songInfo.artist, songInfo.release_date);
+          var chart  = result.chart;
+          var source = result.source;
+          chart.source = source;
+          await saveChartToDB(chart, songInfo.title, songInfo.artist, source);
+          return { fromDatabase: false, chart: chart, source: source };
+        } finally {
+          if (identifyChartRequests.get(chartRequestKey) === chartRequest) {
+            identifyChartRequests.delete(chartRequestKey);
+          }
         }
-      } catch(e) { console.log("DB lookup error:", e.message); }
-    }
-
-    console.log("Step 3: Looking up chord chart from real sources or AI...");
-    var chart, source;
-    if (songInfo) {
-      var result = await fetchChartFromSources(songInfo.title, songInfo.artist, songInfo.release_date);
-      chart  = result.chart;
-      source = result.source;
-      chart.source = source;
-      await saveChartToDB(chart, songInfo.title, songInfo.artist, source);
+      })();
+      identifyChartRequests.set(chartRequestKey, chartRequest);
     } else {
-      // No song info at all — last-ditch LLM call with placeholder labels.
-      chart  = await generateChartWithAI("Unknown Song", "Unknown Artist", null, null, null, null);
-      source = "ai_generated";
+      console.log("Reusing in-flight chart request for", songInfo.title, "by", songInfo.artist);
     }
 
-    res.json({ identified: !!songInfo, fromDatabase: false, songInfo, chart, source });
+    var chartResult = await chartRequest;
+    res.json({
+      identified: true,
+      fromDatabase: chartResult.fromDatabase,
+      songInfo: songInfo,
+      chart: chartResult.chart,
+      source: chartResult.source,
+    });
 
   } catch(error) {
     console.error("Error:", error.message);
-    res.status(500).json({ error: error.message });
+    res.status(error.code === "LYRICS_UNAVAILABLE" ? 422 : 500).json({ error: error.message, code: error.code });
+  }
+});
+
+// POST /deconstruct { audioBase64, mimeType?, separate? }
+//
+// First production-safe slice of Paul's deconstruction handoff:
+// capture-quality gate -> key -> optional Demucs stems -> harmonic chord
+// timelines for guitar/piano/other. Stages we have not safely ported yet are
+// returned under `stagesSkipped` instead of being faked.
+app.post("/deconstruct", rateLimit("deconstruct", 20), async function(req, res) {
+  var audioBase64 = req.body.audioBase64;
+  if (!audioBase64) return res.status(400).json({ error: "No audio provided" });
+
+  var tempPath = null;
+  try {
+    var audioBuffer = Buffer.from(audioBase64, "base64");
+    console.log("Deconstruct: analysing uploaded audio (" + (audioBuffer.length / 1024).toFixed(0) + " KB)");
+    var analysis = await analyzeUploadedAudio(audioBuffer, {
+      separate: req.body.separate !== false,
+      transcribe: false,
+    });
+
+    if (req.body.transcribe === true) {
+      if (!process.env.OPENAI_API_KEY) {
+        analysis.stagesSkipped.lyrics = "OPENAI_API_KEY is not configured";
+      } else {
+        try {
+          var transcriptBuffer = audioBuffer;
+          var transcriptMime = req.body.mimeType || "audio/m4a";
+          var transcriptSource = "original";
+          if (analysis.stems && analysis.stems.vocals) {
+            var vocals = await axios.get(analysis.stems.vocals, { responseType: "arraybuffer" });
+            transcriptBuffer = Buffer.from(vocals.data);
+            transcriptMime = "audio/wav";
+            transcriptSource = "vocals_stem";
+          }
+          var ext = transcriptMime.includes("wav") ? "wav" : (transcriptMime.includes("mp3") ? "mp3" : "m4a");
+          tempPath = path.join(os.tmpdir(), "deconstruct_transcribe_" + Date.now() + "." + ext);
+          fs.writeFileSync(tempPath, transcriptBuffer);
+          var tr = await openai.audio.transcriptions.create({
+            file: fs.createReadStream(tempPath),
+            model: "whisper-1",
+            response_format: "verbose_json",
+          });
+          analysis.lyrics = {
+            transcript: tr.text || "",
+            language: tr.language || null,
+            source: transcriptSource,
+          };
+          analysis.stagesRun.push("lyrics");
+          delete analysis.stagesSkipped.lyrics;
+        } catch(e) {
+          analysis.stagesSkipped.lyrics = e.message;
+        }
+      }
+    } else {
+      analysis.stagesSkipped.lyrics = "not requested";
+    }
+
+    res.json({
+      ok: true,
+      input: {
+        bytes: audioBuffer.length,
+        mimeType: req.body.mimeType || null,
+      },
+      analysis: analysis,
+    });
+  } catch(e) {
+    console.error("Deconstruct error:", e.message);
+    res.status(500).json({ error: e.message });
+  } finally {
+    if (tempPath) {
+      try { fs.unlinkSync(tempPath); } catch(_) {}
+    }
   }
 });
 

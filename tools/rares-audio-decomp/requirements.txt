@@ -1,0 +1,35 @@
+# Verified working on the machine this package was built on:
+#   macOS (Apple silicon) · Python 3.12.7 · ffmpeg 7.x (Homebrew)
+#
+# Versions are the ones actually in use, not aspirational. Loosen them if you
+# need to; these are recorded so a future failure can be bisected against a
+# known-good set.
+
+# ── CORE. decompose.py needs nothing beyond these (+ ffmpeg on PATH). ────────
+numpy==2.0.1
+scipy==1.14.1
+soundfile==0.12.1
+
+# ── FULL PIPELINE ───────────────────────────────────────────────────────────
+# Beat tracking, key (2nd estimator), and the Discogs-EffNet tagging heads.
+#
+# ⚠️ AGPL-3.0. Read docs/04-licensing.md BEFORE this goes into a product.
+# ⚠️ Use `essentia-tensorflow`, NOT `essentia` — the plain package has the DSP
+#    but not TensorflowPredictEffnetDiscogs, so the models in models/ will not
+#    load and stage 7 silently skips.
+# ⚠️ Wheels exist for a limited set of Python versions. If pip cannot find one,
+#    that is a Python-version problem, not a network problem.
+essentia-tensorflow==2.1b6.dev1389
+
+# Source separation — the highest-leverage stage (docs/03-mir-lessons.md §4).
+# Pulls torch/torchaudio, which is the bulk of the install (~2 GB).
+demucs==4.1.0
+
+# ── OPTIONAL ────────────────────────────────────────────────────────────────
+# Downbeat tracking (ISMIR 2024). Not wired into analyse_song.py yet — it is
+# the recommended fix for the downbeat gap, docs/02-gaps.md §4.
+# beat-this==1.1.0
+
+# For evaluating against annotated corpora. Not used yet; see docs/02-gaps.md §8
+# — building this is the first thing I would do.
+# mir_eval

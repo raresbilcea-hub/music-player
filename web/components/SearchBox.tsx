@@ -15,12 +15,8 @@ export function SearchBox() {
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const q = query.trim();
-    if (q.length < 2) {
-      setResults([]);
-      setSearching(false);
-      return;
-    }
-    setSearching(true);
+    if (q.length < 2) return;
+
     debounceRef.current = setTimeout(async () => {
       try {
         const songs = await searchSongs(q);
@@ -36,6 +32,13 @@ export function SearchBox() {
     };
   }, [query]);
 
+  const updateQuery = (value: string) => {
+    setQuery(value);
+    const shouldSearch = value.trim().length >= 2;
+    setSearching(shouldSearch);
+    if (!shouldSearch) setResults([]);
+  };
+
   return (
     <div>
       <input
@@ -43,7 +46,7 @@ export function SearchBox() {
         type="search"
         placeholder="Search any song or artist..."
         value={query}
-        onChange={(e) => setQuery(e.target.value)}
+        onChange={(e) => updateQuery(e.target.value)}
         autoComplete="off"
       />
       {searching && <p className={styles.hint}>Searching...</p>}
@@ -52,11 +55,10 @@ export function SearchBox() {
           <button
             key={`${song.title}-${song.artist}-${i}`}
             className={styles.row}
-            onClick={() =>
-              router.push(
-                `/song?title=${encodeURIComponent(song.title)}&artist=${encodeURIComponent(song.artist)}`
-              )
-            }
+            onClick={() => {
+              const url = `/song?title=${encodeURIComponent(song.title)}&artist=${encodeURIComponent(song.artist)}${song.artwork ? `&artwork=${encodeURIComponent(song.artwork)}` : ""}`;
+              router.push(url);
+            }}
           >
             {song.artwork ? (
               // eslint-disable-next-line @next/next/no-img-element

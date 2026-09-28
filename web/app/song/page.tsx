@@ -1,31 +1,39 @@
 "use client";
 
-// Chart page: /song?title=...&artist=...
-// Fast path: chart already cached server-side -> renders immediately.
-// Slow path: first request for this song -> POST /chords kicks off the
-// full pipeline (scrapers -> audio analysis -> AI), with staged progress
-// UI and a polling fallback if the long request drops.
-
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Suspense, useCallback, useEffect, useState } from "react";
-import { getCachedChart, generateChartWithFallback, saveCorrection } from "../../lib/api";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import {
+  getCachedChart,
+  generateChartWithFallback,
+  saveCorrection,
+} from "../../lib/api";
 import type { ChordChart } from "../../lib/chart";
 import { ChartView, type ChordTarget } from "../../components/ChartView";
 import { ChordSheet } from "../../components/ChordSheet";
 import { ChordEditModal } from "../../components/ChordEditModal";
 import { LoadingPipeline } from "../../components/LoadingPipeline";
+import { FreeGateModal } from "../../components/FreeGateModal";
+import { useAuth } from "../../context/auth";
+import { shouldShowGate, consumeFreeAction } from "../../lib/freeGate";
+import { addToHistory } from "../../lib/songHistory";
 import styles from "./page.module.css";
 
 function SongPageInner() {
   const params = useSearchParams();
   const title = params.get("title") ?? "";
   const artist = params.get("artist") ?? "";
+  const artwork = params.get("artwork") ?? undefined;
+
+  const { session, loading: authLoading } = useAuth();
+  const isAuthenticated = Boolean(session?.user.id);
+  const artworkRef = useRef(artwork);
 
   const [chart, setChart] = useState<ChordChart | null>(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [gated, setGated] = useState(false);
 
   const [diagramChord, setDiagramChord] = useState<string | null>(null);
 
@@ -36,19 +44,41 @@ function SongPageInner() {
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
-    if (!title || !artist) {
-      setError("Missing song information.");
-      setLoading(false);
-      return;
-    }
+    artworkRef.current = artwork;
+  }, [artwork]);
+
+  useEffect(() => {
+    if (authLoading) return;
+
     let cancelled = false;
     (async () => {
+      setError(null);
+      setChart(null);
+      setLoading(true);
+      setGenerating(false);
+      setGated(false);
+
+      if (!title || !artist) {
+        setError("Missing song information.");
+        setLoading(false);
+        return;
+      }
+
+      // Gate check: unauthenticated users get 3 free songs per month
+      if (!isAuthenticated && shouldShowGate()) {
+        setGated(true);
+        setLoading(false);
+        return;
+      }
+
       try {
         const cached = await getCachedChart(title, artist);
         if (cancelled) return;
         if (cached) {
           setChart(cached);
           setLoading(false);
+          addToHistory({ title, artist, artwork: artworkRef.current });
+          if (!isAuthenticated) consumeFreeAction();
           return;
         }
         setLoading(false);
@@ -56,9 +86,13 @@ function SongPageInner() {
         const generated = await generateChartWithFallback(title, artist);
         if (cancelled) return;
         setChart(generated);
+        addToHistory({ title, artist, artwork: artworkRef.current });
+        if (!isAuthenticated) consumeFreeAction();
       } catch (e) {
         if (!cancelled) {
-          setError(e instanceof Error ? e.message : "Could not load this chart.");
+          setError(
+            e instanceof Error ? e.message : "Could not load this chart."
+          );
         }
       } finally {
         if (!cancelled) {
@@ -70,7 +104,7 @@ function SongPageInner() {
     return () => {
       cancelled = true;
     };
-  }, [title, artist]);
+  }, [title, artist, isAuthenticated, authLoading]);
 
   const startEdit = useCallback(() => {
     if (!chart) return;
@@ -80,7 +114,8 @@ function SongPageInner() {
   }, [chart]);
 
   const cancelEdit = useCallback(() => {
-    if (dirty && !window.confirm("Throw away your chord changes without saving?")) return;
+    if (dirty && !window.confirm("Throw away your chord changes without saving?"))
+      return;
     setEditMode(false);
     setDraft(null);
     setEditTarget(null);
@@ -91,7 +126,8 @@ function SongPageInner() {
     (chordName: string) => {
       if (!draft || !editTarget) return;
       const next = structuredClone(draft);
-      const line = next.sections[editTarget.sectionIndex]?.lines[editTarget.lineIndex];
+      const line =
+        next.sections[editTarget.sectionIndex]?.lines[editTarget.lineIndex];
       if (line) {
         line.chords = line.chords ?? [];
         if (editTarget.chordIndex === null) {
@@ -110,7 +146,8 @@ function SongPageInner() {
   const deleteChord = useCallback(() => {
     if (!draft || !editTarget || editTarget.chordIndex === null) return;
     const next = structuredClone(draft);
-    const line = next.sections[editTarget.sectionIndex]?.lines[editTarget.lineIndex];
+    const line =
+      next.sections[editTarget.sectionIndex]?.lines[editTarget.lineIndex];
     if (line?.chords) line.chords.splice(editTarget.chordIndex, 1);
     setDraft(next);
     setDirty(true);
@@ -140,7 +177,10 @@ function SongPageInner() {
     }
   }, [draft, title, artist]);
 
-  if (loading) return <main />;
+  if (loading || authLoading) return <main />;
+
+  if (gated) return <FreeGateModal />;
+
   if (generating) {
     return (
       <main>
@@ -148,6 +188,7 @@ function SongPageInner() {
       </main>
     );
   }
+
   if (error || !chart) {
     return (
       <main>
@@ -199,8 +240,8 @@ function SongPageInner() {
       {editMode && (
         <p className={`${styles.editBanner} no-print`}>
           {dirty
-            ? "⚠️ You have unsaved changes — press “Save chart” above to keep them!"
-            : "Tap a chord to change or remove it. Tap anywhere in the lyrics to add a chord at that spot."}
+            ? '⚠️ You have unsaved changes — press "Save chart" above to keep them!'
+            : 'Tap a chord to change or remove it. Tap anywhere in the lyrics to add a chord at that spot.'}
         </p>
       )}
 

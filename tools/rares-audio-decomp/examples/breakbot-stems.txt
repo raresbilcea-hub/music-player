@@ -1,0 +1,98 @@
+## THE KEYS (`other` stem) — chord per bar
+
+ bar  best reading    score   runner-up       score   top pitch classes
+   9  Dm9             0.358   Dm              0.344   D F A E
+  10  A#              0.455   Dm              0.451   D F C A#
+  11  A               0.484   A7              0.462   E A C# G
+  12  Dm              0.361   Gm9             0.357   D F A G
+  13  A#              0.350   Gm7             0.344   F D A# C
+  14  Dm              0.440   A#maj7          0.417   D F A A#
+  15  C#m             0.480   A               0.435   E C# G# F
+  16  Dm              0.388   Dm9             0.370   D F A G
+  17  Dm              0.389   Dm9             0.371   D F A E
+  18  Dm              0.404   Dm9             0.401   F D A E
+  19  C               0.373   Fmaj9           0.355   C E G F
+  20  Dm              0.398   Dm9             0.391   A D F E
+  21  C               0.392   C7              0.366   G E C D
+  22  Asus4           0.411   Dm9             0.404   A E F D
+  23  C               0.447   C7              0.406   G C E F
+  24  Dm              0.450   Dm7             0.419   F D A C
+  25  A#maj9          0.374   A#              0.373   D A# C E
+  26  Dm              0.417   A#              0.414   D F A A#
+  27  A               0.509   A7              0.464   E C# A G
+  28  Gm7             0.374   Gm9             0.357   F A# D G
+  29  Gm7             0.328   Gm9             0.322   F A# G C
+  30  Dm              0.392   A#maj7          0.374   D F A E
+  31  C#m             0.465   C#m7            0.421   E C# F G#
+  32  Dm              0.445   Dm7             0.404   D F A G
+  33  Dm              0.411   Dm7             0.376   D F A G
+  34  Dm9             0.345   Dm7             0.344   D C F A
+  35  A               0.488   A7              0.437   E C# A F
+  36  Gm7             0.384   Gm9             0.368   A# F D G
+  37  Gm7             0.331   Gm9             0.325   A# F G C
+  38  Asus4           0.376   Dm9             0.375   D E F A
+  39  C#m             0.442   C#m7            0.400   C# E F G#
+  40  Dm              0.467   Dm7             0.428   D F A E
+
+chord sequence, bars 9-40:
+  Dm9 -> A# -> A -> Dm -> A# -> Dm -> C#m -> Dm -> Dm -> Dm -> C -> Dm -> C -> Asus4 -> C -> Dm -> A#maj9 -> Dm -> A -> Gm7 -> Gm7 -> Dm -> C#m -> Dm -> Dm -> Dm9 -> A -> Gm7 -> Gm7 -> Asus4 -> C#m -> Dm
+
+most common: [('Dm', 12), ('Gm7', 4), ('A', 3), ('C#m', 3), ('C', 3), ('Dm9', 2)]
+
+KEYS REGISTER — where the stem's energy actually is:
+     60-130   Hz    0.8%
+    130-260   Hz    7.7%  ###
+    260-520   Hz   52.4%  ##########################
+    520-1040  Hz   14.5%  #######
+   1040-2080  Hz   15.0%  #######
+   2080-4160  Hz    8.5%  ####
+   4160-12000 Hz    0.9%
+
+
+## THE BASS — note per beat, bars 9-24
+
+  D4  G4  A3  D4  C#1  A1  C#1  C#1  A2  A3  C2  D2  A#2  A2  G1  G3  A2  A2  G1  G3  A#1  A#1  C#1  A#1  C#2  G4  G4  D#4  D4  E4  D4  D4
+
+  distinct pitch classes : 10
+  register               : 25-67 MIDI = 35-392 Hz
+  median |interval|      : 8 semitones
+  OCTAVE LEAPS           : 1 of 63 moves = 2%
+
+
+## THE DRUMS — which 16th gets struck (16 bars summed)
+   downbeat found 3/16 of a bar from where the tempo grid put it
+
+  step  0 (1)  #################### 37
+  step  1 (e)                       0
+  step  2 (&)                       0
+  step  3 (a)  ###########          21
+  step  4 (2)  ############         23
+  step  5 (e)                       1
+  step  6 (&)                       0
+  step  7 (a)  ##############       26
+  step  8 (3)  ################     31
+  step  9 (e)  #                    2
+  step 10 (&)                       1
+  step 11 (a)  ############         24
+  step 12 (4)  ##########           20
+  step 13 (e)                       0
+  step 14 (&)                       1
+  step 15 (a)  ###########          22
+
+
+## THE VOCAL — presence per 8 bars
+
+  bars   1-8     -20.5 dB  IN
+  bars   9-16    -18.6 dB  IN
+  bars  17-24    -17.4 dB  IN
+  bars  25-32    -18.1 dB  IN
+  bars  33-40    -19.2 dB  IN
+  bars  41-48    -17.6 dB  IN
+
+
+## STEM BALANCE — what sits where in the mix
+
+  bass       -17.5 dB     +0.0 vs the loudest
+  vocals     -19.0 dB     -1.5 vs the loudest
+  other      -19.1 dB     -1.6 vs the loudest
+  drums      -20.6 dB     -3.1 vs the loudest

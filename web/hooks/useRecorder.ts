@@ -10,7 +10,7 @@
 //   - iOS Safari records audio/mp4 (AAC); Chrome/Android records audio/webm.
 //     We send whichever mimeType was actually used to the server.
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { identifyRecording, type IdentifyResult } from "../lib/api";
 
 export type RecorderState =
@@ -50,16 +50,33 @@ export function useRecorder(onIdentified: (result: IdentifyResult) => void) {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const identifyAbortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
 
   const cleanup = useCallback(() => {
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    if (recorder?.state === "recording") {
+      recorder.onstop = null;
+      recorder.stop();
+    }
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
-    recorderRef.current = null;
   }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      identifyAbortRef.current?.abort();
+      identifyAbortRef.current = null;
+      cleanup();
+    };
+  }, [cleanup]);
 
   const stop = useCallback(() => {
     const rec = recorderRef.current;
@@ -82,8 +99,13 @@ export function useRecorder(onIdentified: (result: IdentifyResult) => void) {
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch {
+      if (!mountedRef.current) return;
       setError("Microphone access was denied. Allow it in your browser settings and try again.");
       setState("error");
+      return;
+    }
+    if (!mountedRef.current) {
+      stream.getTracks().forEach((t) => t.stop());
       return;
     }
 
@@ -98,16 +120,31 @@ export function useRecorder(onIdentified: (result: IdentifyResult) => void) {
     };
     recorder.onstop = async () => {
       cleanup();
+      if (!mountedRef.current) return;
       setState("identifying");
+      const identifyController = new AbortController();
+      identifyAbortRef.current = identifyController;
       try {
         const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || "audio/webm" });
         const base64 = await blobToBase64(blob);
-        const result = await identifyRecording(base64, blob.type);
+        if (!mountedRef.current) return;
+        const result = await identifyRecording(base64, blob.type, identifyController.signal);
+        if (!mountedRef.current) return;
+        if (!result.identified || !result.songInfo) {
+          setError("We couldn't identify that song. Try recording again closer to the music.");
+          setState("error");
+          return;
+        }
         setState("identified");
         onIdentified(result);
       } catch (e) {
+        if (!mountedRef.current || (e instanceof Error && e.name === "AbortError")) return;
         setError(e instanceof Error ? e.message : "Something went wrong while identifying.");
         setState("error");
+      } finally {
+        if (identifyAbortRef.current === identifyController) {
+          identifyAbortRef.current = null;
+        }
       }
     };
 
@@ -126,6 +163,8 @@ export function useRecorder(onIdentified: (result: IdentifyResult) => void) {
   }, [cleanup, onIdentified, stop]);
 
   const reset = useCallback(() => {
+    identifyAbortRef.current?.abort();
+    identifyAbortRef.current = null;
     cleanup();
     setState("idle");
     setError(null);

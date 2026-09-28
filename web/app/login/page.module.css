@@ -1,0 +1,72 @@
+.page {
+  max-width: 400px;
+  margin: 0 auto;
+  padding: 48px 16px;
+}
+
+.title {
+  font-size: 26px;
+  font-weight: 800;
+  margin: 0 0 28px;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--text-dim);
+}
+
+.input {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  font-size: 16px;
+  color: var(--text);
+  width: 100%;
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.error {
+  color: var(--danger);
+  font-size: 14px;
+  margin: 0;
+}
+
+.submit {
+  background: var(--accent);
+  color: #15120a;
+  font-weight: 700;
+  font-size: 17px;
+  padding: 15px;
+  border-radius: var(--radius);
+  width: 100%;
+  margin-top: 4px;
+}
+
+.submit:disabled {
+  opacity: 0.6;
+}
+
+.switch {
+  margin-top: 22px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 15px;
+}
+
+.switchLink {
+  color: var(--accent);
+}

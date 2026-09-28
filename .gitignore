@@ -10,6 +10,12 @@ demucs-test-output/
 redemption.m4a
 test-clip.wav
 
+# Paul's local audio decomposition handoff.
+# The .pb model weights are non-commercial evaluation assets; keep them local.
+tools/rares-audio-decomp/cache/
+tools/rares-audio-decomp/.venv/
+tools/rares-audio-decomp/models/*.pb
+
 # Web app build artifacts
 web/node_modules/
 web/.next/

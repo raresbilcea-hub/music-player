@@ -44,6 +44,8 @@ const MIN_NON_DIATONIC_SHARE = 0.15; // chords outside the detected key need muc
 const MAX_VOCAB_SIZE = 6;
 const MAX_PROGRESSION_LENGTH = 16;
 const NO_CHORD_LABEL = "N";       // essentia's "no chord / silence" label
+const CAPTURE_SAMPLE_RATE = 44100;
+const CAPTURE_FFT_SIZE = 4096;
 
 function normalizeForMatch(s) {
   return String(s || "")
@@ -307,6 +309,172 @@ function readWavAsFloat32(wavPath) {
   });
 }
 
+function percentile(values, pct) {
+  if (!values.length) return 0;
+  var sorted = values.slice().sort(function (a, b) { return a - b; });
+  var idx = Math.min(sorted.length - 1, Math.max(0, Math.floor((pct / 100) * (sorted.length - 1))));
+  return sorted[idx];
+}
+
+function db(v) {
+  return 20 * Math.log10(Math.max(v, 1e-20));
+}
+
+function fft(re, im) {
+  var n = re.length;
+  for (var i = 1, j = 0; i < n; i++) {
+    var bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      var tr = re[i]; re[i] = re[j]; re[j] = tr;
+      var ti = im[i]; im[i] = im[j]; im[j] = ti;
+    }
+  }
+  for (var len = 2; len <= n; len <<= 1) {
+    var ang = -2 * Math.PI / len;
+    var wlenR = Math.cos(ang);
+    var wlenI = Math.sin(ang);
+    for (var start = 0; start < n; start += len) {
+      var wr = 1, wi = 0;
+      for (var k = 0; k < len / 2; k++) {
+        var uR = re[start + k], uI = im[start + k];
+        var vR = re[start + k + len / 2] * wr - im[start + k + len / 2] * wi;
+        var vI = re[start + k + len / 2] * wi + im[start + k + len / 2] * wr;
+        re[start + k] = uR + vR;
+        im[start + k] = uI + vI;
+        re[start + k + len / 2] = uR - vR;
+        im[start + k + len / 2] = uI - vI;
+        var nextWr = wr * wlenR - wi * wlenI;
+        wi = wr * wlenI + wi * wlenR;
+        wr = nextWr;
+      }
+    }
+  }
+}
+
+function spectralProfile(samples, sampleRate) {
+  var n = CAPTURE_FFT_SIZE;
+  var hop = CAPTURE_FFT_SIZE;
+  var maxSamples = Math.min(samples.length, sampleRate * 20);
+  var power = new Array(n / 2 + 1).fill(0);
+  var frameCount = 0;
+  var window = new Array(n);
+  for (var i = 0; i < n; i++) window[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1));
+
+  for (var start = 0; start + n <= maxSamples; start += hop) {
+    var re = new Array(n);
+    var im = new Array(n).fill(0);
+    for (var j = 0; j < n; j++) re[j] = samples[start + j] * window[j];
+    fft(re, im);
+    for (var bin = 0; bin <= n / 2; bin++) {
+      power[bin] += re[bin] * re[bin] + im[bin] * im[bin];
+    }
+    frameCount++;
+  }
+  if (frameCount === 0) return null;
+  for (var p = 0; p < power.length; p++) power[p] /= frameCount;
+
+  var total = power.reduce(function (sum, x) { return sum + x; }, 0);
+  var bands = {};
+  [[20, 60], [60, 130], [130, 260], [260, 520], [520, 1040], [1040, 2080], [2080, 4160], [4160, 11000]].forEach(function (range) {
+    var lo = range[0], hi = range[1], e = 0;
+    for (var b = 0; b < power.length; b++) {
+      var hz = b * sampleRate / n;
+      if (hz >= lo && hz < hi) e += power[b];
+    }
+    bands[lo + "-" + hi] = total > 0 ? Math.round((100 * e / total) * 100) / 100 : 0;
+  });
+
+  var lowEnergy = 0;
+  for (var low = 0; low < power.length; low++) {
+    if (low * sampleRate / n < 100) lowEnergy += power[low];
+  }
+
+  var thirds = [];
+  for (var edge = 50; edge < sampleRate / 2; edge *= Math.pow(2, 1 / 3)) {
+    var next = edge * Math.pow(2, 1 / 3);
+    var e2 = 0, bins = 0;
+    for (var tb = 0; tb < power.length; tb++) {
+      var f = tb * sampleRate / n;
+      if (f >= edge && f < next) { e2 += power[tb]; bins++; }
+    }
+    if (bins > 0) thirds.push({ center: Math.sqrt(edge * next), level: 10 * Math.log10(e2 / bins + 1e-20) });
+  }
+  var peakLevel = Math.max.apply(null, thirds.map(function (x) { return x.level; }));
+  var alive = thirds.filter(function (x) { return x.level > peakLevel - 50; });
+  var bandwidth = alive.length ? alive[alive.length - 1].center : 0;
+  var lastLevel = thirds.length ? thirds[thirds.length - 1].level : peakLevel;
+  var rolloff = alive.length ? alive[alive.length - 1].level - lastLevel : 0;
+
+  return {
+    bandsPct: bands,
+    energyBelow100HzPct: total > 0 ? Math.round((100 * lowEnergy / total) * 1000) / 1000 : 0,
+    bandwidthHz: Math.round(bandwidth * 10) / 10,
+    rolloffAboveBandwidthDb: Math.round(rolloff * 10) / 10,
+  };
+}
+
+async function captureGate(audioBuffer) {
+  var wavPath = await convertToWav(audioBuffer);
+  try {
+    var samples = await readWavAsFloat32(wavPath);
+    var duration = samples.length / CAPTURE_SAMPLE_RATE;
+    var peak = 0, clipped = 0;
+    for (var i = 0; i < samples.length; i++) {
+      var abs = Math.abs(samples[i]);
+      if (abs > peak) peak = abs;
+      if (abs > 0.999) clipped++;
+    }
+
+    var frame = 2048;
+    var rms = [];
+    for (var start = 0; start + frame <= samples.length; start += frame) {
+      var sum = 0;
+      for (var j = 0; j < frame; j++) sum += samples[start + j] * samples[start + j];
+      rms.push(Math.sqrt(sum / frame + 1e-20));
+    }
+    if (!rms.length) rms.push(0);
+
+    var floorDb = db(percentile(rms, 5));
+    var medianDb = db(percentile(rms, 50));
+    var spectral = spectralProfile(samples, CAPTURE_SAMPLE_RATE) || {};
+    var warnings = [];
+    var clippingPct = samples.length ? 100 * clipped / samples.length : 0;
+    var headroom = medianDb - floorDb;
+
+    if (samples.length < 256) warnings.push("NO USABLE AUDIO: fewer than 256 samples decoded");
+    if (clippingPct > 0.1) warnings.push("CLIPPING: " + clippingPct.toFixed(2) + "% of samples at full scale");
+    if (peak < 0.05) warnings.push("VERY QUIET: peak " + db(peak).toFixed(1) + " dBFS");
+    if (headroom < 6) warnings.push("LOW DYNAMIC HEADROOM: " + headroom.toFixed(1) + " dB between median and quietest frames");
+    if (spectral.bandwidthHz && spectral.bandwidthHz < 8000 && spectral.rolloffAboveBandwidthDb >= 20) {
+      warnings.push("BAND-LIMITED CAPTURE: energy stops near " + Math.round(spectral.bandwidthHz) + " Hz");
+    }
+    if (spectral.energyBelow100HzPct != null && spectral.energyBelow100HzPct < 1.0) {
+      warnings.push("NO LOW END: " + spectral.energyBelow100HzPct.toFixed(2) + "% of energy below 100 Hz");
+    }
+    if (duration < 15) warnings.push("SHORT: " + duration.toFixed(1) + "s; tempo/key/chords are provisional");
+
+    return {
+      durationS: Math.round(duration * 100) / 100,
+      peak: Math.round(peak * 10000) / 10000,
+      peakDbfs: Math.round(db(peak) * 100) / 100,
+      clippingPct: Math.round(clippingPct * 10000) / 10000,
+      noiseFloorDbfs: Math.round(floorDb * 100) / 100,
+      medianRmsDbfs: Math.round(medianDb * 100) / 100,
+      dynamicHeadroomDb: Math.round(headroom * 100) / 100,
+      bandwidthHz: spectral.bandwidthHz || 0,
+      rolloffAboveBandwidthDb: spectral.rolloffAboveBandwidthDb || 0,
+      energyBelow100HzPct: spectral.energyBelow100HzPct || 0,
+      bandsPct: spectral.bandsPct || {},
+      warnings: warnings,
+      verdict: warnings.length ? warnings.length + " concern(s)" : "OK",
+    };
+  } finally {
+    try { fs.unlinkSync(wavPath); } catch (e) {}
+  }
+}
+
 // Detect the musical key from an audio buffer (run on the full mix, not a
 // stem — key estimation works best with all instruments present). Replaces
 // the Spotify audio-analysis lookup, which Spotify shut down (returns 403).
@@ -548,9 +716,73 @@ async function analyzeAudioForChords(title, artist) {
   return null;
 }
 
+async function analyzeUploadedAudio(audioBuffer, options) {
+  options = options || {};
+  var result = {
+    stagesRun: [],
+    stagesSkipped: {},
+    capture: null,
+    key: null,
+    stems: null,
+    harmony: [],
+  };
+
+  result.capture = await captureGate(audioBuffer);
+  result.stagesRun.push("capture");
+
+  try {
+    result.key = await detectKeyFromAudio(audioBuffer);
+    if (result.key) result.stagesRun.push("key");
+    else result.stagesSkipped.key = "key detector returned low confidence or no key";
+  } catch (e) {
+    result.stagesSkipped.key = e.message;
+  }
+
+  if (options.separate === false) {
+    result.stagesSkipped.separation = "not requested";
+    return result;
+  }
+
+  var stems = await runDemucs(audioBuffer);
+  if (!stems) {
+    result.stagesSkipped.separation = "Demucs unavailable, unconfigured, or failed";
+    return result;
+  }
+  result.stems = stems;
+  result.stagesRun.push("separation");
+
+  var harmonicStems = ["guitar", "piano", "other"];
+  for (var i = 0; i < harmonicStems.length; i++) {
+    var stemName = harmonicStems[i];
+    if (!stems[stemName]) continue;
+    try {
+      var stemBuffer = await downloadBuffer(stems[stemName]);
+      var raw = await detectChordsFromAudio(stemBuffer);
+      var timeline = smoothChordTimeline(raw.segments, raw.clipDuration);
+      var summary = summarizeTimeline(timeline, result.key);
+      result.harmony.push({
+        stem: stemName,
+        clipDuration: raw.clipDuration,
+        summary: summary,
+        timeline: timeline,
+      });
+    } catch (e) {
+      result.stagesSkipped["harmony_" + stemName] = e.message;
+    }
+  }
+  if (result.harmony.length) result.stagesRun.push("harmony");
+  result.stagesSkipped.bass = "not implemented in JS yet; Paul package has method in src/library/bassline.py";
+  result.stagesSkipped.drums = "not implemented in JS yet; Paul package has method in analyse_song.py drum_grid";
+  result.stagesSkipped.lyrics = options.transcribe ? "lyrics transcription should run against vocals stem in a follow-up" : "not requested";
+  result.stagesSkipped.structure = "not implemented yet; Paul package has section boundary methods";
+  return result;
+}
+
 module.exports = {
   analyzeAudioForChords,
   detectKeyFromAudio,
+  captureGate,
+  analyzeUploadedAudio,
   // exposed for test scripts only
-  _internals: { detectChordsFromAudio, smoothChordTimeline, summarizeTimeline, isDiatonic, findItunesPreview, downloadFullSong },
+  _internals: { detectChordsFromAudio, smoothChordTimeline, summarizeTimeline, isDiatonic, findItunesPreview, downloadFullSong, runDemucs, downloadBuffer, convertToWav, readWavAsFloat32 },
 };

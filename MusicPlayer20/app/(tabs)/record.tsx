@@ -42,7 +42,11 @@ type ChordChart = {
   tempo?:      number | string;
   capo?:       number | string;
 };
-type IdentifyResult = { identified: boolean; songInfo?: SongInfo; chart: ChordChart };
+type IdentifyResult = {
+  identified: boolean;
+  songInfo?: SongInfo | null;
+  chart?: ChordChart;
+};
 type StatusKey = 'idle' | 'listening' | 'processing' | 'identifying' | 'identified' | 'generated' | 'error';
 
 function artworkUrl(songInfo?: SongInfo): string {
@@ -165,10 +169,20 @@ export default function RecordScreen() {
       });
       const data = await response.json();
       setIsProcessing(false);
-      if (data.error) { setStatusKey('error'); setErrorMsg(data.error); return; }
+      if (!response.ok || data.error) {
+        setStatusKey('error');
+        setErrorMsg(data.error || `Identification failed (${response.status})`);
+        return;
+      }
+      if (!data.identified || !data.songInfo) {
+        setResult(null);
+        setStatusKey('error');
+        setErrorMsg('Song not identified. Move closer to the music and try again.');
+        return;
+      }
 
       // Save to history so Songs tab shows this song
-      const si = data.songInfo as SongInfo | undefined;
+      const si = data.songInfo as SongInfo;
       await addToHistory({
         title:   data.chart?.title  ?? si?.title  ?? '',
         artist:  data.chart?.artist ?? si?.artist ?? '',
@@ -179,7 +193,7 @@ export default function RecordScreen() {
 
       await consumeFreeAction();
       setResult(data);
-      setStatusKey(data.identified ? 'identified' : 'generated');
+      setStatusKey('identified');
     } catch (e: any) {
       setIsProcessing(false);
       setStatusKey('error');

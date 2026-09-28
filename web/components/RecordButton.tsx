@@ -12,10 +12,9 @@ export function RecordButton() {
   const onIdentified = useCallback(
     (result: IdentifyResult) => {
       if (result.identified && result.songInfo) {
-        const { title, artist } = result.songInfo;
-        router.push(
-          `/song?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}`
-        );
+        const { title, artist, artwork } = result.songInfo;
+        const url = `/song?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}${artwork ? `&artwork=${encodeURIComponent(artwork)}` : ""}`;
+        router.push(url);
       }
     },
     [router]

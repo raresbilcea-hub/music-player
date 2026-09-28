@@ -83,25 +83,54 @@ export async function generateChartWithFallback(
 
 export type IdentifyResult = {
   identified: boolean;
-  songInfo?: SongInfo;
+  songInfo?: SongInfo | null;
   chart?: ChordChart;
   source?: string;
 };
 
+// /identify still returns the chart for recognized songs, and an uncached
+// chart can run through the multi-minute audio-analysis fallback.
+const IDENTIFY_TIMEOUT_MS = 4 * 60_000;
+
 export async function identifyRecording(
   audioBase64: string,
-  mimeType: string
+  mimeType: string,
+  signal?: AbortSignal
 ): Promise<IdentifyResult> {
-  const res = await fetch(`${API_URL}/identify`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ audioBase64, mimeType }),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => null);
-    throw new Error(body?.error || `Identification failed (${res.status})`);
+  const controller = new AbortController();
+  let timedOut = false;
+  const abortRequest = () => controller.abort();
+  if (signal?.aborted) {
+    controller.abort();
+  } else {
+    signal?.addEventListener("abort", abortRequest, { once: true });
   }
-  return (await res.json()) as IdentifyResult;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, IDENTIFY_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(`${API_URL}/identify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ audioBase64, mimeType }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(body?.error || `Identification failed (${res.status})`);
+    }
+    return (await res.json()) as IdentifyResult;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError" && timedOut) {
+      throw new Error("Song identification timed out. Please try again.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", abortRequest);
+  }
 }
 
 export async function saveCorrection(chart: {

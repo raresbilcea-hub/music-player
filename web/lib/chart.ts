@@ -27,7 +27,7 @@ export type SongInfo = {
   artwork?: string;
 };
 
-export function buildChordLine(chords: Chord[], lyrics: string): string {
+export function buildChordLine(chords: Chord[]): string {
   if (!chords?.length) return "";
   const sorted = [...chords].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
   let out = "";
@@ -40,7 +40,7 @@ export function buildChordLine(chords: Chord[], lyrics: string): string {
 }
 
 export function buildDisplayLyric(chords: Chord[], lyrics: string): string {
-  const cl = buildChordLine(chords, lyrics);
+  const cl = buildChordLine(chords);
   return cl.length > lyrics.length ? lyrics.padEnd(cl.length, " ") : lyrics;
 }
 
