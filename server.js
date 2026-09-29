@@ -12,7 +12,11 @@ const os   = require("os");
 const { analyzeAudioForChords, analyzeUploadedAudio } = require("./audioAnalysis");
 
 const app = express();
-const port = process.env.PORT || 3000;
+// Railway's current service networking target is configured for port 3000.
+// Keep this explicit until the target port is migrated together with the
+// deployment settings; otherwise Railway injects 8080 and the proxy returns
+// 502 even though the process starts successfully.
+const port = 3000;
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const supabase = createClient(
   process.env.SUPABASE_URL,
