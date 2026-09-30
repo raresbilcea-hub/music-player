@@ -96,8 +96,10 @@ export async function generateChartWithFallback(
 export type IdentifyResult = {
   identified: boolean;
   songInfo?: SongInfo | null;
-  chart?: ChordChart;
+  chart?: ChordChart | null;
   source?: string;
+  lyricsAvailable?: boolean;
+  lyricsUnavailable?: boolean;
 };
 
 // /identify still returns the chart for recognized songs, and an uncached

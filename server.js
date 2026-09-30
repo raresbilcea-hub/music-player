@@ -118,6 +118,16 @@ function chartContainsLyricsRefusal(chart) {
   return containsLyricsRefusal(lyrics.join("\n"));
 }
 
+function chartHasLyrics(chart) {
+  var sections = chart && Array.isArray(chart.sections) ? chart.sections : [];
+  return sections.some(function (section) {
+    var lines = section && Array.isArray(section.lines) ? section.lines : [];
+    return lines.some(function (line) {
+      return String(line && line.lyrics || "").trim().length > 0;
+    });
+  });
+}
+
 function lyricsUnavailableError() {
   var error = new Error("Lyrics are unavailable for this song.");
   error.code = "LYRICS_UNAVAILABLE";
@@ -140,12 +150,20 @@ async function fetchChartFromDB(title, artist) {
     if (!!b.verified !== !!a.verified) return b.verified ? 1 : -1;
     return (b.play_count || 0) - (a.play_count || 0);
   });
-  var r = candidates[0];
-  var chart = { title: r.title, artist: r.artist, musicalKey: r.musical_key, tempo: r.tempo, capo: r.capo, sections: r.sections, verified: r.verified, source: r.source };
-  if (chartContainsLyricsRefusal(chart)) {
-    console.warn("Ignoring cached chart containing a lyrics refusal for", r.title, "by", r.artist);
-    return null;
+  var r = null;
+  var chart = null;
+  for (var i = 0; i < candidates.length; i++) {
+    var candidate = candidates[i];
+    var candidateChart = { title: candidate.title, artist: candidate.artist, musicalKey: candidate.musical_key, tempo: candidate.tempo, capo: candidate.capo, sections: candidate.sections, verified: candidate.verified, source: candidate.source };
+    if (chartContainsLyricsRefusal(candidateChart)) {
+      console.warn("Ignoring cached chart containing a lyrics refusal for", candidate.title, "by", candidate.artist);
+      continue;
+    }
+    r = candidate;
+    chart = candidateChart;
+    break;
   }
+  if (!r || !chart) return null;
   await supabase.from("chord_charts").update({ play_count: (r.play_count || 0) + 1 }).eq("id", r.id);
   return chart;
 }
@@ -1245,25 +1263,34 @@ async function fetchHtml(url) {
 // Returns { chart, source } where source is one of:
 //   "ultimate_guitar", "cifraclub", "echords", "audio_analysis", "ai_generated"
 
-async function fetchChartFromSources(title, artist, releaseDate) {
+async function fetchChartFromRealSources(title, artist) {
   // SKIP_SCRAPERS=1 forces the audio-analysis path — used when testing the
   // pipeline against songs the chord sites already cover.
   var chart;
   if (process.env.SKIP_SCRAPERS === "1") {
     console.log("Sources: SKIP_SCRAPERS set — going straight to audio analysis");
-  } else {
-    console.log("Sources: trying Ultimate-Guitar for", title, "by", artist);
-    chart = await fetchChartFromUG(title, artist);
-    if (chart) return { chart: chart, source: "ultimate_guitar" };
-
-    console.log("Sources: trying Cifra Club for", title, "by", artist);
-    chart = await fetchChartFromCifra(title, artist);
-    if (chart) return { chart: chart, source: "cifraclub" };
-
-    console.log("Sources: trying e-chords for", title, "by", artist);
-    chart = await fetchChartFromEchords(title, artist);
-    if (chart) return { chart: chart, source: "echords" };
+    return null;
   }
+
+  console.log("Sources: trying Ultimate-Guitar for", title, "by", artist);
+  chart = await fetchChartFromUG(title, artist);
+  if (chart) return { chart: chart, source: "ultimate_guitar" };
+
+  console.log("Sources: trying Cifra Club for", title, "by", artist);
+  chart = await fetchChartFromCifra(title, artist);
+  if (chart) return { chart: chart, source: "cifraclub" };
+
+  console.log("Sources: trying e-chords for", title, "by", artist);
+  chart = await fetchChartFromEchords(title, artist);
+  if (chart) return { chart: chart, source: "echords" };
+
+  return null;
+}
+
+async function fetchChartFromSources(title, artist, releaseDate) {
+  var chart;
+  var realResult = await fetchChartFromRealSources(title, artist);
+  if (realResult) return realResult;
 
   // No human-curated source had it — gather lyrics + key/tempo once, shared
   // by both the audio-analysis attempt and the final AI fallback.
@@ -1285,6 +1312,48 @@ async function fetchChartFromSources(title, artist, releaseDate) {
   console.log("Sources: falling back to plain AI generation");
   chart = await generateChartWithAI(title, artist, releaseDate || null, spotifyResult.spotifyKey, spotifyResult.spotifyTempo, lyricsResult ? lyricsResult.plain : null);
   return { chart: chart, source: "ai_generated" };
+}
+
+async function canonicalSongCandidates(songInfo) {
+  var candidates = [];
+  function add(title, artist) {
+    title = String(title || "").trim();
+    artist = String(artist || "").trim();
+    if (!title || !artist) return;
+    var key = title.toLowerCase() + "\u0000" + artist.toLowerCase();
+    if (!candidates.some(function (candidate) { return candidate.key === key; })) {
+      candidates.push({ key: key, title: title, artist: artist });
+    }
+  }
+
+  var apple = songInfo.apple_music || {};
+  add(apple.name, apple.artistName);
+  var spotify = songInfo.spotify || {};
+  add(spotify.name, spotify.artists && spotify.artists[0] && spotify.artists[0].name);
+
+  try {
+    var query = songInfo.title + " " + songInfo.artist;
+    var response = await axios.get(
+      "https://itunes.apple.com/search?term=" + encodeURIComponent(query) + "&entity=song&limit=8",
+      { timeout: 8000 }
+    );
+    var results = response.data && Array.isArray(response.data.results) ? response.data.results : [];
+    var requestedTitle = normalizeForLookup(songInfo.title).toLowerCase();
+    for (var i = 0; i < results.length; i++) {
+      var item = results[i];
+      var itemTitle = normalizeForLookup(item.trackName).toLowerCase();
+      var titleMatches = itemTitle === requestedTitle
+        || itemTitle.indexOf(requestedTitle) !== -1
+        || requestedTitle.indexOf(itemTitle) !== -1;
+      if (titleMatches && artistsLooselyMatch(item.artistName, songInfo.artist)) {
+        add(item.trackName, item.artistName);
+      }
+    }
+  } catch(error) {
+    console.log("iTunes canonical metadata lookup failed:", error.message);
+  }
+
+  return candidates;
 }
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
@@ -1503,13 +1572,80 @@ app.post("/identify", rateLimit("identify", 50), async function(req, res) {
       console.log("Reusing in-flight chart request for", songInfo.title, "by", songInfo.artist);
     }
 
-    var chartResult = await chartRequest;
+    var chartResult;
+    try {
+      chartResult = await chartRequest;
+    } catch(error) {
+      if (error.code === "LYRICS_UNAVAILABLE") {
+        console.log("AudD metadata produced no safe chart; trying canonical metadata");
+        var canonicalCandidates = await canonicalSongCandidates(songInfo);
+        var originalKey = String(songInfo.title).trim().toLowerCase()
+          + "\u0000"
+          + String(songInfo.artist).trim().toLowerCase();
+        for (var i = 0; i < canonicalCandidates.length; i++) {
+          var canonical = canonicalCandidates[i];
+          if (canonical.key === originalKey) continue;
+          try {
+            console.log("Retrying chart with canonical metadata:", canonical.title, "by", canonical.artist);
+            var canonicalCached = await fetchChartFromDB(canonical.title, canonical.artist);
+            if (canonicalCached) {
+              chartResult = {
+                fromDatabase: true,
+                chart: canonicalCached,
+                source: canonicalCached.source,
+              };
+            } else {
+              var canonicalResult = await fetchChartFromRealSources(
+                canonical.title,
+                canonical.artist
+              );
+              if (!canonicalResult) continue;
+              canonicalResult.chart.source = canonicalResult.source;
+              await saveChartToDB(
+                canonicalResult.chart,
+                canonical.title,
+                canonical.artist,
+                canonicalResult.source
+              );
+              chartResult = {
+                fromDatabase: false,
+                chart: canonicalResult.chart,
+                source: canonicalResult.source,
+              };
+            }
+            songInfo = Object.assign({}, songInfo, {
+              title: canonical.title,
+              artist: canonical.artist,
+            });
+            break;
+          } catch(canonicalError) {
+            console.log("Canonical chart retry failed:", canonicalError.message);
+          }
+        }
+        if (!chartResult) {
+          console.log("Song identified, but no safe lyrics chart is available");
+          return res.json({
+            identified: true,
+            fromDatabase: false,
+            songInfo: songInfo,
+            chart: null,
+            lyricsAvailable: false,
+            lyricsUnavailable: true,
+          });
+        }
+      } else {
+        throw error;
+      }
+    }
+    var lyricsAvailable = chartHasLyrics(chartResult.chart);
     res.json({
       identified: true,
       fromDatabase: chartResult.fromDatabase,
       songInfo: songInfo,
       chart: chartResult.chart,
       source: chartResult.source,
+      lyricsAvailable: lyricsAvailable,
+      lyricsUnavailable: !lyricsAvailable,
     });
 
   } catch(error) {

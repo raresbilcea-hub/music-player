@@ -24,6 +24,7 @@ function SongPageInner() {
   const title = params.get("title") ?? "";
   const artist = params.get("artist") ?? "";
   const artwork = params.get("artwork") ?? undefined;
+  const lyricsUnavailable = params.get("lyricsUnavailable") === "1";
 
   const { session, loading: authLoading } = useAuth();
   const isAuthenticated = Boolean(session?.user.id);
@@ -81,6 +82,10 @@ function SongPageInner() {
           if (!isAuthenticated) consumeFreeAction();
           return;
         }
+        if (lyricsUnavailable) {
+          setError("Song identified, but no verified lyric chart is available yet.");
+          return;
+        }
         setLoading(false);
         setGenerating(true);
         const generated = await generateChartWithFallback(title, artist);
@@ -104,7 +109,7 @@ function SongPageInner() {
     return () => {
       cancelled = true;
     };
-  }, [title, artist, isAuthenticated, authLoading]);
+  }, [title, artist, lyricsUnavailable, isAuthenticated, authLoading]);
 
   const startEdit = useCallback(() => {
     if (!chart) return;

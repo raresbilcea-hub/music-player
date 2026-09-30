@@ -13,7 +13,7 @@ export function RecordButton() {
     (result: IdentifyResult) => {
       if (result.identified && result.songInfo) {
         const { title, artist, artwork } = result.songInfo;
-        const url = `/song?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}${artwork ? `&artwork=${encodeURIComponent(artwork)}` : ""}`;
+        const url = `/song?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}${artwork ? `&artwork=${encodeURIComponent(artwork)}` : ""}${result.lyricsUnavailable ? "&lyricsUnavailable=1" : ""}`;
         router.push(url);
       }
     },
