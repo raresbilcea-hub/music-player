@@ -924,6 +924,38 @@ function slugify(s) {
     .replace(/^-|-$/g, "");
 }
 
+function identityText(s) {
+  return stripAccents(normalizeForLookup(s))
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function titlesMatch(actual, requested) {
+  var a = identityText(actual);
+  var b = identityText(requested);
+  return !!a && !!b && a === b;
+}
+
+function pageIdentityMatches($, title, artist) {
+  var identity = [
+    $("title").first().text(),
+    $("meta[property='og:title']").attr("content") || "",
+    $("meta[name='twitter:title']").attr("content") || "",
+    $("h1").first().text(),
+    $("h2").first().text(),
+    $("[itemprop='name']").slice(0, 4).text(),
+  ].join(" ");
+  var normalized = identityText(identity);
+  var normalizedTitle = identityText(title);
+  var normalizedArtist = identityText(artist);
+  return !!normalizedTitle && !!normalizedArtist
+    && normalized.indexOf(normalizedTitle) !== -1
+    && normalized.indexOf(normalizedArtist) !== -1;
+}
+
 // A real-browser User-Agent — sites block axios/node-fetch defaults.
 var SCRAPER_HEADERS = {
   "User-Agent":       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -976,6 +1008,11 @@ async function fetchChartFromUG(rawTitle, rawArtist) {
       if (!r) continue;
       var typeName = r.type || r.type_name;
       if (typeName !== "Chords" && typeName !== "chords") continue;
+      var resultTitle = r.song_name || r.song || r.title;
+      var resultArtist = r.artist_name || r.artist;
+      if (!titlesMatch(resultTitle, title) || !artistsLooselyMatch(resultArtist, artist)) {
+        continue;
+      }
       var score = (r.rating || 0) * Math.log(1 + (r.votes || 0));
       if (score > bestRating && r.tab_url) {
         bestRating = score;
@@ -1002,6 +1039,20 @@ function parseUGTabPage(html, title, artist) {
   try { data = JSON.parse(storeRaw); } catch(e) { console.log("UG tab JSON parse error:", e.message); return null; }
 
   var tabView = data && data.store && data.store.page && data.store.page.data && data.store.page.data.tab_view;
+  var pageData = data && data.store && data.store.page && data.store.page.data;
+  var tab = pageData && pageData.tab;
+  var meta = (tabView && tabView.meta) || {};
+  var actualTitle = (tab && (tab.song_name || tab.song && tab.song.name))
+    || meta.song_name || meta.title;
+  var actualArtist = (tab && (tab.artist_name || tab.artist && tab.artist.name))
+    || meta.artist_name || meta.artist;
+  var metadataMatches = actualTitle && actualArtist
+    && titlesMatch(actualTitle, title)
+    && artistsLooselyMatch(actualArtist, artist);
+  if (!metadataMatches && !pageIdentityMatches($, title, artist)) {
+    console.log("UG: tab identity mismatch; rejecting result");
+    return null;
+  }
   var rawContent = tabView && tabView.wiki_tab && tabView.wiki_tab.content;
   if (!rawContent) { console.log("UG: no wiki_tab content on tab page"); return null; }
 
@@ -1032,7 +1083,6 @@ function parseUGTabPage(html, title, artist) {
   if (sections.length === 0) { console.log("UG: parseChordPro produced 0 sections"); return null; }
 
   // UG provides metadata directly — use what they tell us
-  var meta = (tabView && tabView.meta) || {};
   var musicalKey = meta.tonality_name || data.store.page.data.tab && data.store.page.data.tab.tonality_name || null;
   var capo       = meta.capo || (data.store.page.data.tab && data.store.page.data.tab.capo) || 0;
   var tempo      = (data.store.page.data.tab && data.store.page.data.tab.tempo) || null;
@@ -1079,10 +1129,14 @@ async function fetchChartFromCifra(rawTitle, rawArtist) {
     $("a").each(function() {
       if (songLink) return;
       var href = $(this).attr("href") || "";
-      // Filter for song-page URLs (have artist + song segments, no extra suffixes)
-      if (/^\/[a-z0-9-]+\/[a-z0-9-]+\/?$/.test(href)) {
-        songLink = href.startsWith("http") ? href : "https://www.cifraclub.com.br" + href;
-      }
+      try {
+        var candidateUrl = new URL(href, "https://www.cifraclub.com.br");
+        if (candidateUrl.hostname !== "www.cifraclub.com.br" && candidateUrl.hostname !== "cifraclub.com.br") return;
+        var segments = candidateUrl.pathname.split("/").filter(Boolean);
+        if (segments.length !== 2) return;
+        if (segments[0] !== artistSlug || segments[1] !== titleSlug) return;
+        songLink = candidateUrl.origin + "/" + segments.join("/") + "/";
+      } catch(_) {}
     });
     if (!songLink) { console.log("Cifra Club: no song link in search results"); return null; }
     console.log("Cifra Club: search found " + songLink);
@@ -1099,6 +1153,10 @@ async function fetchChartFromCifra(rawTitle, rawArtist) {
 
 function parseCifraClubHtml(html, title, artist) {
   var $ = cheerio.load(html);
+  if (!pageIdentityMatches($, title, artist)) {
+    console.log("Cifra Club: page identity mismatch; rejecting result");
+    return null;
+  }
 
   // Find the chord-chart pre. Cifra Club uses class "cifra_chord", but the
   // exact class varies; fall back to any pre containing multiple <b> tags
