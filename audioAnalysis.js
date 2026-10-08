@@ -537,24 +537,33 @@ async function detectChordsFromAudio(buffer) {
   }
 }
 
-// Collapse transient flicker: merge segments shorter than MIN_CHORD_DURATION
-// into the previous segment, re-collapse newly-adjacent duplicates, and drop
-// "no chord" silence segments. Returns [{ chord, time, duration, strength }].
+// Collapse transient flicker while preserving the source recording's absolute
+// time axis. "No chord" segments are omitted from the returned chord list but
+// their time remains a real gap; this is essential when aligning the chord
+// timeline with Whisper timestamps after an instrumental intro or silence.
+// Returns [{ chord, time, duration, strength }].
 function smoothChordTimeline(segments, clipDuration) {
   if (!segments || segments.length === 0) return [];
 
   var withDur = segments.map(function (seg, i) {
     var end = (i + 1 < segments.length) ? segments[i + 1].time : clipDuration;
-    return { chord: seg.chord, strength: seg.strength, duration: Math.max(0, end - seg.time) };
+    var start = Math.max(0, Number(seg.time) || 0);
+    end = Math.max(start, Number(end) || start);
+    return { chord: seg.chord, strength: seg.strength, time: start, duration: end - start };
   });
 
   var merged = [];
   for (var i = 0; i < withDur.length; i++) {
     var seg = withDur[i];
     if (seg.duration < MIN_CHORD_DURATION && merged.length > 0) {
-      merged[merged.length - 1].duration += seg.duration;
+      var previous = merged[merged.length - 1];
+      var segmentEnd = seg.time + seg.duration;
+      // Treat a very short detection as flicker belonging to the immediately
+      // preceding segment, but extend to its real end instead of adding a
+      // compressed duration.
+      previous.duration = Math.max(previous.time + previous.duration, segmentEnd) - previous.time;
     } else {
-      merged.push(seg);
+      merged.push({ chord: seg.chord, strength: seg.strength, time: seg.time, duration: seg.duration });
     }
   }
 
@@ -563,18 +572,14 @@ function smoothChordTimeline(segments, clipDuration) {
     var seg = merged[i];
     if (seg.chord === NO_CHORD_LABEL) continue;
     var last = collapsed[collapsed.length - 1];
-    if (last && last.chord === seg.chord) {
-      last.duration += seg.duration;
+    var lastEnd = last ? last.time + last.duration : null;
+    var isContiguous = last && Math.abs(lastEnd - seg.time) < 0.001;
+    if (last && last.chord === seg.chord && isContiguous) {
+      last.duration = Math.max(lastEnd, seg.time + seg.duration) - last.time;
       last.strength = Math.max(last.strength, seg.strength);
     } else {
-      collapsed.push({ chord: seg.chord, strength: seg.strength, duration: seg.duration });
+      collapsed.push({ chord: seg.chord, strength: seg.strength, time: seg.time, duration: seg.duration });
     }
-  }
-
-  var t = 0;
-  for (var i = 0; i < collapsed.length; i++) {
-    collapsed[i].time = t;
-    t += collapsed[i].duration;
   }
   return collapsed;
 }
@@ -684,6 +689,7 @@ async function analyzeAudioForChords(title, artist) {
   if (!stems) return null;
 
   var stemOrder = ["guitar", "other"];
+  var bestWeakResult = null;
   for (var i = 0; i < stemOrder.length; i++) {
     var stemName = stemOrder[i];
     var stemUrl = stems[stemName];
@@ -693,19 +699,23 @@ async function analyzeAudioForChords(title, artist) {
       var raw = await detectChordsFromAudio(stemBuffer);
       var timeline = smoothChordTimeline(raw.segments, raw.clipDuration);
       var summary = summarizeTimeline(timeline, detectedKey);
+      var candidate = {
+        chords: summary.vocabulary,
+        progression: summary.progression,
+        key: detectedKey,
+        timeline: timeline.filter(function (s) { return summary.vocabulary.indexOf(s.chord) !== -1; }),
+        clipDuration: raw.clipDuration,
+        vocalsUrl: stems.vocals || null,
+        sourceClip: sourceClip,
+        chordStem: stemName,
+        chordConfidence: summary.avgStrength,
+      };
       if (summary.distinctCount >= MIN_DISTINCT_CHORDS && summary.avgStrength >= MIN_AVG_STRENGTH) {
         console.log("audioAnalysis: using " + stemName + " stem - " + summary.distinctCount + " chords, avg strength " + summary.avgStrength.toFixed(2));
-        return {
-          chords: summary.vocabulary,
-          progression: summary.progression,
-          key: detectedKey,
-          // clip-relative [{ chord, time, duration }], noise chords removed
-          // so alignment can't place a chord the vocabulary rejected
-          timeline: timeline.filter(function (s) { return summary.vocabulary.indexOf(s.chord) !== -1; }),
-          clipDuration: raw.clipDuration,
-          vocalsUrl: stems.vocals || null, // for Whisper-based lyric alignment
-          sourceClip: sourceClip,
-        };
+        return candidate;
+      }
+      if (!bestWeakResult || summary.avgStrength > bestWeakResult.chordConfidence) {
+        bestWeakResult = candidate;
       }
       console.log("audioAnalysis: " + stemName + " stem too weak (" + summary.distinctCount + " chords, avg strength " + summary.avgStrength.toFixed(2) + ") - trying next");
     } catch (e) {
@@ -713,7 +723,21 @@ async function analyzeAudioForChords(title, artist) {
     }
   }
 
-  return null;
+  // A weak harmonic result is still useful because Demucs may have produced
+  // a clean vocals stem. Return the separation metadata so the caller can
+  // transcribe lyrics and report a partial result instead of discarding the
+  // whole job. Do not expose weak chords as if they passed the quality gate.
+  return {
+    chords: [],
+    progression: [],
+    key: detectedKey,
+    timeline: [],
+    clipDuration: bestWeakResult ? bestWeakResult.clipDuration : null,
+    vocalsUrl: stems.vocals || null,
+    sourceClip: sourceClip,
+    chordStem: bestWeakResult ? bestWeakResult.chordStem : null,
+    chordConfidence: bestWeakResult ? bestWeakResult.chordConfidence : null,
+  };
 }
 
 async function analyzeUploadedAudio(audioBuffer, options) {

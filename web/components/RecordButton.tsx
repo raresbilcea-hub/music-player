@@ -13,21 +13,24 @@ export function RecordButton() {
     (result: IdentifyResult) => {
       if (result.identified && result.songInfo) {
         const { title, artist, artwork } = result.songInfo;
-        const url = `/song?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}${artwork ? `&artwork=${encodeURIComponent(artwork)}` : ""}${result.lyricsUnavailable ? "&lyricsUnavailable=1" : ""}`;
+        // The adaptive microphone probes use identifyOnly=true. That response
+        // intentionally does not include a chart yet, so let the song page
+        // start the normal chart-generation pipeline after navigation.
+        const url = `/song?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}${artwork ? `&artwork=${encodeURIComponent(artwork)}` : ""}`;
         router.push(url);
       }
     },
     [router]
   );
 
-  const { state, error, secondsLeft, start, stop, reset } = useRecorder(onIdentified);
+  const { state, error, start, stop, reset } = useRecorder(onIdentified);
 
   const label =
-    state === "listening" ? `${secondsLeft}s` : state === "identifying" ? "..." : "TAP TO\nLISTEN";
+    state === "listening" ? "LISTENING" : state === "identifying" ? "..." : "TAP TO\nLISTEN";
 
   const status =
     state === "listening"
-      ? "Listening... play or sing the song"
+      ? "Listening... identifying automatically"
       : state === "identifying"
         ? "Identifying the song..."
         : state === "identified"

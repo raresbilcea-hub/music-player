@@ -43,6 +43,11 @@ export function ChartView({
               <b>{Math.round(chart.tempo)}</b> BPM
             </span>
           ) : null}
+          {chart.transcriptLanguage && (
+            <span className={styles.pill}>
+              Lyrics <b>{chart.transcriptLanguage.toUpperCase()}</b>
+            </span>
+          )}
           <span className={styles.pill}>
             Capo <b>{chart.capo || "none"}</b>
           </span>

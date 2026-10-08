@@ -1,8 +1,8 @@
 "use client";
 
 // Microphone recording for song identification (Shazam-style).
-// State machine mirrors the mobile app's record flow:
-//   idle -> listening (10s auto-stop) -> identifying -> identified | error
+// State machine for adaptive song identification:
+//   idle -> listening (incremental probes) -> identifying -> identified | error
 //
 // iOS Safari constraints handled here:
 //   - getUserMedia + MediaRecorder must be created inside the user's tap
@@ -20,7 +20,8 @@ export type RecorderState =
   | "identified"
   | "error";
 
-const RECORD_SECONDS = 10;
+const PROBE_SECONDS = [4, 8, 12, 18, 25, 35];
+const MAX_LISTEN_SECONDS = PROBE_SECONDS[PROBE_SECONDS.length - 1];
 
 function pickMimeType(): string {
   if (typeof MediaRecorder === "undefined") return "";
@@ -45,12 +46,16 @@ function blobToBase64(blob: Blob): Promise<string> {
 export function useRecorder(onIdentified: (result: IdentifyResult) => void) {
   const [state, setState] = useState<RecorderState>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [secondsLeft, setSecondsLeft] = useState(RECORD_SECONDS);
+  const [secondsLeft, setSecondsLeft] = useState(MAX_LISTEN_SECONDS);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const identifyAbortRef = useRef<AbortController | null>(null);
+  const probeIndexRef = useRef(0);
+  const probeInFlightRef = useRef(false);
+  const matchedRef = useRef(false);
+  const chunksRef = useRef<Blob[]>([]);
   const mountedRef = useRef(true);
 
   const cleanup = useCallback(() => {
@@ -115,12 +120,17 @@ export function useRecorder(onIdentified: (result: IdentifyResult) => void) {
       : new MediaRecorder(stream);
 
     const chunks: Blob[] = [];
+    chunksRef.current = chunks;
+    probeIndexRef.current = 0;
+    probeInFlightRef.current = false;
+    matchedRef.current = false;
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) chunks.push(e.data);
     };
     recorder.onstop = async () => {
       cleanup();
       if (!mountedRef.current) return;
+      if (matchedRef.current) return;
       setState("identifying");
       const identifyController = new AbortController();
       identifyAbortRef.current = identifyController;
@@ -128,7 +138,7 @@ export function useRecorder(onIdentified: (result: IdentifyResult) => void) {
         const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || "audio/webm" });
         const base64 = await blobToBase64(blob);
         if (!mountedRef.current) return;
-        const result = await identifyRecording(base64, blob.type, identifyController.signal);
+        const result = await identifyRecording(base64, blob.type, identifyController.signal, true);
         if (!mountedRef.current) return;
         if (!result.identified || !result.songInfo) {
           setError("We couldn't identify that song. Try recording again closer to the music.");
@@ -150,15 +160,48 @@ export function useRecorder(onIdentified: (result: IdentifyResult) => void) {
 
     recorderRef.current = recorder;
     streamRef.current = stream;
-    recorder.start();
+    recorder.start(1000);
     setState("listening");
-    setSecondsLeft(RECORD_SECONDS);
+    setSecondsLeft(MAX_LISTEN_SECONDS);
 
-    let remaining = RECORD_SECONDS;
+    let elapsed = 0;
     timerRef.current = setInterval(() => {
-      remaining -= 1;
-      setSecondsLeft(remaining);
-      if (remaining <= 0) stop();
+      elapsed += 1;
+      setSecondsLeft(Math.max(0, MAX_LISTEN_SECONDS - elapsed));
+      const nextProbe = PROBE_SECONDS[probeIndexRef.current];
+      if (nextProbe && elapsed >= nextProbe && !probeInFlightRef.current) {
+        probeInFlightRef.current = true;
+        probeIndexRef.current += 1;
+        try { recorder.requestData(); } catch { /* recorder may have stopped */ }
+        setTimeout(async () => {
+          if (!mountedRef.current || matchedRef.current) return;
+          const blob = new Blob(chunks.slice(), { type: recorder.mimeType || mimeType || "audio/webm" });
+          if (blob.size < 256) { probeInFlightRef.current = false; return; }
+          const controller = new AbortController();
+          identifyAbortRef.current = controller;
+          try {
+            const base64 = await blobToBase64(blob);
+            const result = await identifyRecording(base64, blob.type, controller.signal, true);
+            if (result.identified && result.songInfo && mountedRef.current) {
+              matchedRef.current = true;
+              setState("identified");
+              cleanup();
+              onIdentified(result);
+              return;
+            }
+          } catch { /* keep listening; the next window may be clearer */ }
+          finally {
+            if (identifyAbortRef.current === controller) identifyAbortRef.current = null;
+            probeInFlightRef.current = false;
+          }
+          if (probeIndexRef.current >= PROBE_SECONDS.length && mountedRef.current) {
+            setError("We couldn't identify that song within 35 seconds. Try recording again closer to the music.");
+            setState("error");
+            cleanup();
+          }
+        }, 150);
+      }
+      if (elapsed >= MAX_LISTEN_SECONDS && !probeInFlightRef.current) stop();
     }, 1000);
   }, [cleanup, onIdentified, stop]);
 
@@ -168,7 +211,7 @@ export function useRecorder(onIdentified: (result: IdentifyResult) => void) {
     cleanup();
     setState("idle");
     setError(null);
-    setSecondsLeft(RECORD_SECONDS);
+    setSecondsLeft(MAX_LISTEN_SECONDS);
   }, [cleanup]);
 
   return { state, error, secondsLeft, start, stop, reset };

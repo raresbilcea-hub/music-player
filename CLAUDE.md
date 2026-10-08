@@ -66,6 +66,7 @@ User records snippet / searches song
 - Website (Vercel, Root Directory = `web`, env `NEXT_PUBLIC_API_URL`): https://music-player-mocha-five.vercel.app
 - Backend (Railway, deploys on push to master): https://music-player-production-524a.up.railway.app — `GET /` returns config-presence booleans (replicate/openai/supabase/audd/spotify) for diagnosing missing env vars.
 - Both Vercel and Railway deploy automatically on `git push origin master`. Supabase free tier pauses after ~1 week idle (DNS stops resolving → "fetch failed"); Railway can lapse too — check both dashboards first if everything 404s after a break.
+- **Rares' workflow preference (Oct 8, 2026):** MusicPlayer changes should be deployed to the live website by default so Rares can test them directly. After implementing and validating a change, commit and push to `master` unless he explicitly asks to keep it local or in preview. This deploys both `web/` on Vercel and the backend on Railway.
 
 **Chart source ladder (fetchChartFromSources, server.js)** — each rung only runs if the one above fails:
 1. Supabase cache — verified (musician-corrected) charts always win; artist matching is loose ("Hannes" finds "Hannes & waterbaby", "Bob Marley" finds "Bob Marley & The Wailers").
@@ -114,6 +115,7 @@ No build step, no test suite. All logic is in the single file `server.js`.
 | `SUPABASE_URL` / `SUPABASE_KEY` | chord chart storage + auth |
 | `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | audio analysis (key & tempo) |
 | `AUDD_API_KEY` | audio fingerprinting (`/identify`) |
+| `ALLOW_CATALOG_LYRICS_TRANSCRIPTION` | Explicit opt-in for transcribing and caching lyrics from identified catalog tracks. Defaults to `false`; user-authorized uploads through `/deconstruct` remain available. |
 
 ## Routes
 

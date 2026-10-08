@@ -109,7 +109,8 @@ const IDENTIFY_TIMEOUT_MS = 4 * 60_000;
 export async function identifyRecording(
   audioBase64: string,
   mimeType: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  identifyOnly = false
 ): Promise<IdentifyResult> {
   const controller = new AbortController();
   let timedOut = false;
@@ -128,7 +129,7 @@ export async function identifyRecording(
     const res = await fetch(`${API_URL}/identify`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ audioBase64, mimeType }),
+      body: JSON.stringify({ audioBase64, mimeType, identifyOnly }),
       signal: controller.signal,
     });
     if (!res.ok) {

@@ -250,6 +250,13 @@ function SongPageInner() {
         </p>
       )}
 
+      {shown.warning && (
+        <div className={`${styles.resultWarning} no-print`} role="status">
+          <strong>{shown.partial ? "Partial result" : "Transcription note"}</strong>
+          <span>{shown.warning}</span>
+        </div>
+      )}
+
       <ChartView
         chart={shown}
         editMode={editMode}

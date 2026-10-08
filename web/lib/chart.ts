@@ -5,8 +5,26 @@
 // mobile CHAR_W pixel constant.
 
 export type Chord = { chord: string; position: number };
-export type Line = { lyrics: string; chords?: Chord[] };
-export type Section = { label: string; lines: Line[] };
+export type TimedWord = {
+  word: string;
+  start: number;
+  end: number;
+  position: number;
+};
+export type Line = {
+  lyrics: string;
+  chords?: Chord[];
+  start?: number;
+  end?: number;
+  words?: TimedWord[];
+};
+export type Section = {
+  label: string;
+  lines: Line[];
+  transcriptLanguage?: string | null;
+  transcriptSource?: string;
+  warning?: string;
+};
 
 export type ChordChart = {
   title: string;
@@ -17,6 +35,9 @@ export type ChordChart = {
   sections: Section[];
   verified?: boolean;
   source?: string;
+  partial?: boolean;
+  warning?: string;
+  transcriptLanguage?: string | null;
 };
 
 export type SongInfo = {

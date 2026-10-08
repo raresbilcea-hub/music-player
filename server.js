@@ -9,7 +9,12 @@ const { createClient } = require("@supabase/supabase-js");
 const fs   = require("fs");
 const path = require("path");
 const os   = require("os");
+const crypto = require("crypto");
+const ffmpeg = require("fluent-ffmpeg");
+const ffmpegPath = require("ffmpeg-static");
 const { analyzeAudioForChords, analyzeUploadedAudio } = require("./audioAnalysis");
+
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
 // Railway's current service networking target is configured for port 3000.
@@ -18,6 +23,23 @@ const app = express();
 // 502 even though the process starts successfully.
 const port = 3000;
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const ALLOW_CATALOG_LYRICS_TRANSCRIPTION =
+  String(process.env.ALLOW_CATALOG_LYRICS_TRANSCRIPTION || "").toLowerCase() === "true";
+const MAX_AUDIO_UPLOAD_BYTES = 25 * 1024 * 1024;
+const MAX_TRANSCRIBE_AUDIO_SECONDS = 10 * 60;
+const FFMPEG_TIMEOUT_SECONDS = 90;
+const ALLOWED_AUDIO_MIME_TYPES = {
+  "audio/webm": "webm",
+  "audio/ogg": "ogg",
+  "audio/mp4": "m4a",
+  "audio/m4a": "m4a",
+  "audio/x-m4a": "m4a",
+  "audio/wav": "wav",
+  "audio/x-wav": "wav",
+  "audio/mpeg": "mp3",
+  "audio/mp3": "mp3",
+  "audio/flac": "flac",
+};
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY
@@ -129,7 +151,7 @@ function chartHasLyrics(chart) {
 }
 
 function lyricsUnavailableError() {
-  var error = new Error("Lyrics are unavailable for this song.");
+  var error = new Error("The song was found, but its vocals could not be transcribed and no usable lyric source was available. Please try another recording or try again later.");
   error.code = "LYRICS_UNAVAILABLE";
   return error;
 }
@@ -155,6 +177,14 @@ async function fetchChartFromDB(title, artist) {
   for (var i = 0; i < candidates.length; i++) {
     var candidate = candidates[i];
     var candidateChart = { title: candidate.title, artist: candidate.artist, musicalKey: candidate.musical_key, tempo: candidate.tempo, capo: candidate.capo, sections: candidate.sections, verified: candidate.verified, source: candidate.source };
+    var sectionMetadata = candidateChart.sections && candidateChart.sections[0];
+    if (sectionMetadata && sectionMetadata.transcriptLanguage) {
+      candidateChart.transcriptLanguage = sectionMetadata.transcriptLanguage;
+    }
+    if (sectionMetadata && sectionMetadata.warning) {
+      candidateChart.partial = true;
+      candidateChart.warning = sectionMetadata.warning;
+    }
     if (chartContainsLyricsRefusal(candidateChart)) {
       console.warn("Ignoring cached chart containing a lyrics refusal for", candidate.title, "by", candidate.artist);
       continue;
@@ -403,6 +433,9 @@ function validateAndRepairChart(chart) {
     capo:       (chart.capo === 0 || chart.capo) ? chart.capo : 0,
     sections:   [],
   };
+  if (chart.partial === true) out.partial = true;
+  if (chart.warning) out.warning = String(chart.warning);
+  if (chart.transcriptLanguage) out.transcriptLanguage = String(chart.transcriptLanguage);
   var rawSections = Array.isArray(chart.sections) ? chart.sections : [];
   for (var i = 0; i < rawSections.length; i++) {
     var s = rawSections[i] || {};
@@ -425,10 +458,34 @@ function validateAndRepairChart(chart) {
       }
       cleanChords.sort(function(a, b) { return a.position - b.position; });
       if (lyrics.length === 0 && cleanChords.length === 0) continue;
-      cleanLines.push({ lyrics: lyrics, chords: cleanChords });
+      var cleanLine = { lyrics: lyrics, chords: cleanChords };
+      var start = Number(ln.start);
+      var end = Number(ln.end);
+      if (Number.isFinite(start) && start >= 0) cleanLine.start = start;
+      if (Number.isFinite(end) && end >= start) cleanLine.end = end;
+      if (Array.isArray(ln.words)) {
+        cleanLine.words = ln.words.map(function (word) {
+          var value = String(word && word.word || "").trim();
+          var wordStart = Number(word && word.start);
+          var wordEnd = Number(word && word.end);
+          var position = Number(word && word.position);
+          if (!value || !Number.isFinite(wordStart) || !Number.isFinite(wordEnd)) return null;
+          return {
+            word: value,
+            start: Math.max(0, wordStart),
+            end: Math.max(wordStart, wordEnd),
+            position: Number.isFinite(position) ? Math.max(0, Math.min(position, lyrics.length)) : 0,
+          };
+        }).filter(Boolean);
+      }
+      cleanLines.push(cleanLine);
     }
     if (cleanLines.length === 0) continue;
-    out.sections.push({ label: String(s.label || "Verse"), lines: cleanLines });
+    var cleanSection = { label: String(s.label || "Verse"), lines: cleanLines };
+    if (s.transcriptLanguage) cleanSection.transcriptLanguage = String(s.transcriptLanguage);
+    if (s.transcriptSource) cleanSection.transcriptSource = String(s.transcriptSource);
+    if (s.warning) cleanSection.warning = String(s.warning);
+    out.sections.push(cleanSection);
   }
   return out;
 }
@@ -696,6 +753,397 @@ function tokenDice(a, b) {
   return (2 * hits) / (a.length + b.length);
 }
 
+function audioExtensionForMime(mimeType, fallbackUrl) {
+  var normalized = String(mimeType || "").toLowerCase().split(";")[0].trim();
+  if (ALLOWED_AUDIO_MIME_TYPES[normalized]) return ALLOWED_AUDIO_MIME_TYPES[normalized];
+  var urlPath = String(fallbackUrl || "").split("?")[0];
+  var urlExt = path.extname(urlPath).slice(1).toLowerCase();
+  if (["webm", "ogg", "mp4", "m4a", "wav", "mp3", "flac"].includes(urlExt)) return urlExt;
+  return "audio";
+}
+
+function audioPayloadError(message, status) {
+  var error = new Error(message);
+  error.httpStatus = status;
+  return error;
+}
+
+function decodeAudioPayload(audioBase64, mimeType, maxBytes) {
+  var normalizedMime = String(mimeType || "").toLowerCase().split(";")[0].trim();
+  if (!ALLOWED_AUDIO_MIME_TYPES[normalizedMime]) {
+    throw audioPayloadError("Unsupported audio format. Use WebM, OGG, MP4/M4A, WAV, MP3, or FLAC.", 415);
+  }
+  if (typeof audioBase64 !== "string" || !audioBase64.trim()) {
+    throw audioPayloadError("No audio provided", 400);
+  }
+  var normalizedBase64 = audioBase64.replace(/\s/g, "");
+  if (normalizedBase64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(normalizedBase64)) {
+    throw audioPayloadError("Invalid audio data", 400);
+  }
+  var padding = normalizedBase64.endsWith("==") ? 2 : (normalizedBase64.endsWith("=") ? 1 : 0);
+  var estimatedBytes = Math.floor(normalizedBase64.length * 3 / 4) - padding;
+  var limit = maxBytes || MAX_AUDIO_UPLOAD_BYTES;
+  if (estimatedBytes > limit) {
+    throw audioPayloadError("Audio is too large. The maximum upload size is 25 MB.", 413);
+  }
+  var buffer = Buffer.from(normalizedBase64, "base64");
+  if (buffer.length < 256) throw audioPayloadError("Audio is empty or too short.", 400);
+  if (buffer.length > limit) throw audioPayloadError("Audio is too large. The maximum upload size is 25 MB.", 413);
+  return { buffer: buffer, mimeType: normalizedMime, extension: ALLOWED_AUDIO_MIME_TYPES[normalizedMime] };
+}
+
+// Whisper accepts common audio formats but Demucs often returns large WAV
+// stems. Normalise every vocals stem to a compact mono MP3 first so full-song
+// requests stay below the transcription upload limit and carry a correct
+// filename/MIME hint.
+function prepareWhisperAudio(audioBuffer, mimeType, sourceUrl) {
+  return new Promise(function (resolve, reject) {
+    var id = crypto.randomUUID();
+    var inputPath = path.join(os.tmpdir(), "whisper-source-" + id + "." + audioExtensionForMime(mimeType, sourceUrl));
+    var outputPath = path.join(os.tmpdir(), "whisper-ready-" + id + ".mp3");
+    fs.writeFileSync(inputPath, audioBuffer);
+    ffmpeg(inputPath, { timeout: FFMPEG_TIMEOUT_SECONDS })
+      .noVideo()
+      .audioChannels(1)
+      .audioFrequency(16000)
+      .audioBitrate("64k")
+      .duration(MAX_TRANSCRIBE_AUDIO_SECONDS)
+      .format("mp3")
+      .on("error", function (error) {
+        try { fs.unlinkSync(inputPath); } catch (_) {}
+        try { fs.unlinkSync(outputPath); } catch (_) {}
+        reject(error);
+      })
+      .on("end", function () {
+        try { fs.unlinkSync(inputPath); } catch (_) {}
+        resolve(outputPath);
+      })
+      .save(outputPath);
+  });
+}
+
+function cleanTranscribedLine(text) {
+  var cleaned = String(text || "")
+    .replace(/\s+/g, " ")
+    .replace(/^[-–—]\s*/, "")
+    .trim();
+  if (!cleaned) return "";
+  if (/^\[?(?:music|instrumental|applause|silence|inaudible|foreign language)\]?$/i.test(cleaned)) return "";
+  if (/^(?:thanks for watching|thank you for watching|please subscribe|subtitles by|captioning by)(?:[.!…])?$/i.test(cleaned)) return "";
+  return cleaned;
+}
+
+function appendTranscriptWord(currentText, rawWord) {
+  var word = String(rawWord || "").trim();
+  if (!word) return { text: currentText, position: currentText.length };
+  var punctuationOnly = /^[,.;:!?…%)\]}]+$/.test(word);
+  var apostropheSuffix = /^['’](?:s|re|ve|ll|d|m|t)$/i.test(word);
+  var separator = currentText && !punctuationOnly && !apostropheSuffix ? " " : "";
+  return { text: currentText + separator + word, position: currentText.length + separator.length };
+}
+
+function transcriptionToTimedLines(transcription) {
+  var words = Array.isArray(transcription.words) ? transcription.words.filter(function (word) {
+    return word && String(word.word || "").trim() && Number.isFinite(Number(word.start)) && Number.isFinite(Number(word.end));
+  }) : [];
+  var lines = [];
+
+  if (words.length > 0) {
+    var current = null;
+    function flush() {
+      if (!current) return;
+      current.text = cleanTranscribedLine(current.text);
+      if (current.text) lines.push(current);
+      current = null;
+    }
+    words.forEach(function (word) {
+      var start = Number(word.start);
+      var end = Number(word.end);
+      if (!current || start - current.end > 2.4) {
+        flush();
+        current = { text: "", start: start, end: end, words: [] };
+      }
+      var appended = appendTranscriptWord(current.text, word.word);
+      current.text = appended.text;
+      current.end = end;
+      current.words.push({ word: String(word.word).trim(), start: start, end: end, position: appended.position });
+
+      var wordCount = current.words.length;
+      var duration = current.end - current.start;
+      var sentenceEnd = /[.!?…]$/.test(String(word.word).trim());
+      if ((sentenceEnd && wordCount >= 4) || wordCount >= 11 || duration >= 6) flush();
+    });
+    flush();
+  }
+
+  if (lines.length === 0) {
+    (Array.isArray(transcription.segments) ? transcription.segments : []).forEach(function (segment) {
+      var text = cleanTranscribedLine(segment && segment.text);
+      var start = Number(segment && segment.start);
+      var end = Number(segment && segment.end);
+      if (!text || !Number.isFinite(start) || !Number.isFinite(end)) return;
+      lines.push({ text: text, start: Math.max(0, start), end: Math.max(start, end), words: [] });
+    });
+  }
+
+  return lines.filter(function (line) { return cleanTranscribedLine(line.text); });
+}
+
+function assessTranscription(transcription) {
+  var lines = transcriptionToTimedLines(transcription || {});
+  if (lines.length < 2) {
+    return { accepted: false, reason: "fewer than two usable lyric lines", lines: lines, lexicalWordCount: 0 };
+  }
+
+  var lexicalWords = [];
+  lines.forEach(function (line) {
+    var matches = String(line.text || "").match(/[\p{L}\p{N}][\p{L}\p{M}\p{N}'’\-]*/gu);
+    if (matches) lexicalWords = lexicalWords.concat(matches);
+  });
+  if (lexicalWords.length < 6) {
+    return { accepted: false, reason: "fewer than six lexical words", lines: lines, lexicalWordCount: lexicalWords.length };
+  }
+
+  var previousStart = -Infinity;
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    if (!Number.isFinite(line.start) || !Number.isFinite(line.end) || line.start < 0 || line.end <= line.start) {
+      return { accepted: false, reason: "invalid lyric timestamps", lines: lines, lexicalWordCount: lexicalWords.length };
+    }
+    if (line.start + 0.05 < previousStart) {
+      return { accepted: false, reason: "non-monotonic lyric timestamps", lines: lines, lexicalWordCount: lexicalWords.length };
+    }
+    previousStart = line.start;
+  }
+
+  var words = Array.isArray(transcription && transcription.words) ? transcription.words : [];
+  var previousWordStart = -Infinity;
+  for (var w = 0; w < words.length; w++) {
+    var wordStart = Number(words[w] && words[w].start);
+    var wordEnd = Number(words[w] && words[w].end);
+    if (!Number.isFinite(wordStart) || !Number.isFinite(wordEnd) || wordEnd < wordStart || wordStart + 0.05 < previousWordStart) {
+      return { accepted: false, reason: "non-monotonic word timestamps", lines: lines, lexicalWordCount: lexicalWords.length };
+    }
+    previousWordStart = wordStart;
+  }
+
+  return { accepted: true, reason: null, lines: lines, lexicalWordCount: lexicalWords.length };
+}
+
+async function transcribeVocalsStem(vocalsUrl) {
+  if (!vocalsUrl || !process.env.OPENAI_API_KEY) return null;
+  var preparedPath = null;
+  try {
+    console.log("Lyrics: downloading and preparing the Demucs vocals stem for Whisper");
+    var response = await axios.get(vocalsUrl, {
+      responseType: "arraybuffer",
+      timeout: 90 * 1000,
+      maxContentLength: 150 * 1024 * 1024,
+      maxBodyLength: 150 * 1024 * 1024,
+    });
+    var contentType = response.headers && response.headers["content-type"];
+    preparedPath = await prepareWhisperAudio(Buffer.from(response.data), contentType, vocalsUrl);
+    var transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(preparedPath),
+      model: "whisper-1",
+      response_format: "verbose_json",
+      timestamp_granularities: ["segment", "word"],
+    });
+    var result = {
+      text: cleanTranscribedLine(transcription.text),
+      language: transcription.language || null,
+      duration: Number.isFinite(Number(transcription.duration)) ? Number(transcription.duration) : null,
+      segments: Array.isArray(transcription.segments) ? transcription.segments.map(function (segment) {
+        return {
+          text: cleanTranscribedLine(segment.text),
+          start: Number(segment.start),
+          end: Number(segment.end),
+        };
+      }).filter(function (segment) { return segment.text && Number.isFinite(segment.start) && Number.isFinite(segment.end); }) : [],
+      words: Array.isArray(transcription.words) ? transcription.words.map(function (word) {
+        return { word: String(word.word || "").trim(), start: Number(word.start), end: Number(word.end) };
+      }).filter(function (word) { return word.word && Number.isFinite(word.start) && Number.isFinite(word.end); }) : [],
+    };
+    result.acceptance = assessTranscription(result);
+    console.log(
+      "Lyrics: Whisper detected " + (result.language || "unknown language") +
+      " and returned " + result.segments.length + " segments / " + result.words.length +
+      " words; transcript " + (result.acceptance.accepted ? "accepted" : "rejected: " + result.acceptance.reason)
+    );
+    return result.text || result.segments.length ? result : null;
+  } catch (error) {
+    console.log("Lyrics: vocals transcription failed:", error.message);
+    return null;
+  } finally {
+    if (preparedPath) {
+      try { fs.unlinkSync(preparedPath); } catch (_) {}
+    }
+  }
+}
+
+function normalizedLyricFingerprint(text) {
+  return String(text || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+function groupTimedLinesIntoSections(lines, language, warning) {
+  var fingerprints = {};
+  lines.forEach(function (line) {
+    var fingerprint = normalizedLyricFingerprint(line.text);
+    if (fingerprint.split(/\s+/).filter(Boolean).length >= 3) {
+      fingerprints[fingerprint] = (fingerprints[fingerprint] || 0) + 1;
+    }
+  });
+
+  var blocks = [];
+  var current = [];
+  lines.forEach(function (line) {
+    var previous = current[current.length - 1];
+    var repeated = (fingerprints[normalizedLyricFingerprint(line.text)] || 0) > 1;
+    var previousRepeated = previous && (fingerprints[normalizedLyricFingerprint(previous.text)] || 0) > 1;
+    var shouldBreak = current.length > 0 && (
+      (line.start - previous.end >= 3.5) ||
+      current.length >= 8 ||
+      (current.length >= 2 && repeated !== previousRepeated)
+    );
+    if (shouldBreak) {
+      blocks.push(current);
+      current = [];
+    }
+    current.push(line);
+  });
+  if (current.length) blocks.push(current);
+
+  var verseNumber = 0;
+  var chorusNumber = 0;
+  return blocks.map(function (block, blockIndex) {
+    var repeatedCount = block.filter(function (line) {
+      return (fingerprints[normalizedLyricFingerprint(line.text)] || 0) > 1;
+    }).length;
+    var isChorus = block.length >= 2 && repeatedCount / block.length >= 0.5;
+    var label;
+    if (isChorus) {
+      chorusNumber++;
+      label = chorusNumber === 1 ? "Chorus" : "Chorus " + chorusNumber;
+    } else {
+      verseNumber++;
+      label = "Verse " + verseNumber;
+    }
+    var section = {
+      label: label,
+      lines: block,
+      transcriptLanguage: language || null,
+      transcriptSource: "demucs_vocals_whisper",
+    };
+    if (blockIndex === 0 && warning) section.warning = warning;
+    return section;
+  });
+}
+
+function chordsForTimedLine(line, timeline) {
+  if (!Array.isArray(timeline) || timeline.length === 0) return [];
+  var events = [];
+  var soundingAtStart = null;
+  timeline.forEach(function (segment) {
+    var segmentStart = Number(segment.time);
+    var segmentEnd = segmentStart + Number(segment.duration || 0);
+    if (segmentStart <= line.start && segmentEnd > line.start) soundingAtStart = segment.chord;
+    if (segmentStart > line.start && segmentStart < line.end) {
+      events.push({ time: segmentStart, chord: segment.chord });
+    }
+  });
+  if (!soundingAtStart) {
+    for (var i = timeline.length - 1; i >= 0; i--) {
+      if (Number(timeline[i].time) <= line.start) {
+        soundingAtStart = timeline[i].chord;
+        break;
+      }
+    }
+  }
+  if (soundingAtStart) events.unshift({ time: line.start, chord: soundingAtStart });
+
+  var chords = [];
+  events.forEach(function (event) {
+    var position = 0;
+    if (Array.isArray(line.words) && line.words.length > 0) {
+      var closest = line.words[0];
+      for (var w = 0; w < line.words.length; w++) {
+        if (line.words[w].start <= event.time) closest = line.words[w];
+        else break;
+      }
+      position = closest.position || 0;
+    } else if (line.end > line.start) {
+      position = Math.round(((event.time - line.start) / (line.end - line.start)) * line.text.length);
+    }
+    position = Math.max(0, Math.min(position, line.text.length));
+    var previous = chords[chords.length - 1];
+    if (previous && previous.chord === event.chord) return;
+    if (previous && previous.position === position) {
+      previous.chord = event.chord;
+      return;
+    }
+    chords.push({ chord: event.chord, position: position });
+  });
+  // Dense detector flicker is not useful in a static lyric chart.
+  return chords.length > 4 ? chords.slice(0, 4) : chords;
+}
+
+function buildStaticChartFromTranscription(title, artist, detectedChords, transcription, musicalKey, tempo) {
+  var acceptance = transcription.acceptance || assessTranscription(transcription);
+  if (!acceptance.accepted) return null;
+  var timedLines = acceptance.lines;
+  var hasChords = Array.isArray(detectedChords.timeline) && detectedChords.timeline.length > 0;
+  var warning = hasChords
+    ? null
+    : "The vocals were transcribed, but the recording did not contain enough reliable harmonic signal to place chords.";
+  var sections = groupTimedLinesIntoSections(timedLines, transcription.language, warning).map(function (section) {
+    section.lines = section.lines.map(function (line) {
+      return {
+        lyrics: line.text,
+        chords: chordsForTimedLine(line, detectedChords.timeline),
+        start: line.start,
+        end: line.end,
+        words: line.words,
+      };
+    });
+    return section;
+  });
+  return validateAndRepairChart({
+    title: title,
+    artist: artist,
+    musicalKey: musicalKey || null,
+    tempo: tempo || null,
+    capo: 0,
+    sections: sections,
+    partial: !hasChords,
+    warning: warning,
+    transcriptLanguage: transcription.language || null,
+  });
+}
+
+function buildChordOnlyChart(title, artist, detectedChords, musicalKey, tempo) {
+  var progression = detectedChords.progression && detectedChords.progression.length
+    ? detectedChords.progression
+    : detectedChords.chords;
+  if (!progression || progression.length === 0) return null;
+  var warning = "Chords were detected, but the vocals could not be transcribed. The chord progression is still available below.";
+  return validateAndRepairChart({
+    title: title,
+    artist: artist,
+    musicalKey: musicalKey || null,
+    tempo: tempo || null,
+    capo: 0,
+    partial: true,
+    warning: warning,
+    sections: [{
+      label: "Detected chord progression",
+      warning: warning,
+      lines: progression.map(function (chord) {
+        return { lyrics: "", chords: [{ chord: chord, position: 0 }] };
+      }),
+    }],
+  });
+}
+
 // Whisper-transcribe the vocals stem and locate the clip in the song.
 // Returns offset in seconds (song time = clip time + offset) or null.
 async function locateClipInSong(vocalsUrl, lrcLines) {
@@ -858,13 +1306,45 @@ async function fetchChartFromAudioAnalysis(title, artist, releaseDate, realLyric
   var detectedChords = await analyzeAudioForChords(title, artist);
   if (!detectedChords) return null;
 
-  console.log("Audio analysis: detected chords", detectedChords.chords.join(", "), "for", title, "by", artist);
+  console.log(
+    "Audio analysis: detected chords",
+    detectedChords.chords.length ? detectedChords.chords.join(", ") : "(none above the confidence threshold)",
+    "for", title, "by", artist
+  );
   // Spotify's key endpoint is gone (403), so the key heard in the actual
   // recording is our best "confirmed key" for the prompt's key enforcement.
   var confirmedKey = spotifyKey || detectedChords.key || null;
 
+  // The primary lyrics source is now the recording itself: Demucs isolates
+  // vocals, Whisper detects the language and returns word/segment timestamps,
+  // then we place the measured chord timeline directly over those words.
+  var transcription = ALLOW_CATALOG_LYRICS_TRANSCRIPTION && detectedChords.vocalsUrl
+    ? await transcribeVocalsStem(detectedChords.vocalsUrl)
+    : null;
+  if (detectedChords.vocalsUrl && !ALLOW_CATALOG_LYRICS_TRANSCRIPTION) {
+    console.log("Lyrics: catalog transcription is disabled by ALLOW_CATALOG_LYRICS_TRANSCRIPTION");
+  }
+  if (transcription) {
+    var transcribedChart = buildStaticChartFromTranscription(
+      title,
+      artist,
+      detectedChords,
+      transcription,
+      confirmedKey,
+      spotifyTempo
+    );
+    if (transcribedChart) {
+      console.log(
+        "Audio analysis: built a static chart from the vocals transcript (" +
+        transcribedChart.sections.reduce(function (count, section) { return count + section.lines.length; }, 0) +
+        " timed lyric lines)"
+      );
+      return { chart: transcribedChart, source: "audio_transcription" };
+    }
+  }
+
   var alignedLines = null;
-  if (realLyrics && realLyrics.synced && detectedChords.vocalsUrl && detectedChords.timeline) {
+  if (realLyrics && realLyrics.synced && detectedChords.vocalsUrl && detectedChords.timeline.length) {
     var lrcLines = parseLrc(realLyrics.synced);
     if (lrcLines.length >= 4) {
       var offset = await locateClipInSong(detectedChords.vocalsUrl, lrcLines);
@@ -883,8 +1363,18 @@ async function fetchChartFromAudioAnalysis(title, artist, releaseDate, realLyric
     }
   }
 
-  var chart = await generateChartWithAI(title, artist, releaseDate, confirmedKey, spotifyTempo, realLyrics ? realLyrics.plain : null, detectedChords, alignedLines);
-  return { chart: chart, source: "audio_analysis" };
+  if (realLyrics && realLyrics.plain && detectedChords.chords.length) {
+    var chart = await generateChartWithAI(title, artist, releaseDate, confirmedKey, spotifyTempo, realLyrics.plain, detectedChords, alignedLines);
+    return { chart: chart, source: "audio_analysis" };
+  }
+
+  // Do not turn a lyrics failure into a generic 500 after an expensive audio
+  // analysis. If harmony succeeded, return the measured progression and an
+  // explicit warning. The UI can render this partial chart and the user keeps
+  // the useful work that did succeed.
+  var chordOnlyChart = buildChordOnlyChart(title, artist, detectedChords, confirmedKey, spotifyTempo);
+  if (chordOnlyChart) return { chart: chordOnlyChart, source: "audio_analysis_partial" };
+  return null;
 }
 
 async function saveChartToDB(chart, title, artist, source) {
@@ -1367,6 +1857,10 @@ async function fetchChartFromSources(title, artist, releaseDate) {
   }
 
   // Last resort — LLM with our existing lyrics + Spotify pipeline
+  if (!lyricsResult && !ALLOW_CATALOG_LYRICS_TRANSCRIPTION) {
+    console.log("Sources: catalog lyric generation disabled; no external lyrics available");
+    throw lyricsUnavailableError();
+  }
   console.log("Sources: falling back to plain AI generation");
   chart = await generateChartWithAI(title, artist, releaseDate || null, spotifyResult.spotifyKey, spotifyResult.spotifyTempo, lyricsResult ? lyricsResult.plain : null);
   return { chart: chart, source: "ai_generated" };
@@ -1429,6 +1923,7 @@ app.get("/", function(req, res) {
       supabase:  !!(process.env.SUPABASE_URL && process.env.SUPABASE_KEY),
       audd:      !!process.env.AUDD_API_KEY,
       spotify:   !!(process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET),
+      catalogLyricsTranscription: ALLOW_CATALOG_LYRICS_TRANSCRIPTION,
     },
   });
 });
@@ -1593,6 +2088,19 @@ app.post("/identify", rateLimit("identify", 50), async function(req, res) {
     }
     console.log("Identified:", songInfo.title, "by", songInfo.artist);
 
+    // Adaptive browser recognition asks only for metadata. Do not start the
+    // expensive chart/Demucs job on every short microphone window.
+    if (req.body.identifyOnly === true) {
+      return res.json({
+        identified: true,
+        fromDatabase: false,
+        songInfo: songInfo,
+        chart: null,
+        lyricsAvailable: false,
+        lyricsUnavailable: true,
+      });
+    }
+
     var chartRequestKey = normalizeForLookup(songInfo.title).toLowerCase()
       + "\u0000"
       + normalizeForLookup(songInfo.artist).toLowerCase();
@@ -1720,11 +2228,13 @@ app.post("/identify", rateLimit("identify", 50), async function(req, res) {
 // returned under `stagesSkipped` instead of being faked.
 app.post("/deconstruct", rateLimit("deconstruct", 20), async function(req, res) {
   var audioBase64 = req.body.audioBase64;
+  var mimeType = req.body.mimeType || "audio/m4a";
   if (!audioBase64) return res.status(400).json({ error: "No audio provided" });
 
   var tempPath = null;
   try {
-    var audioBuffer = Buffer.from(audioBase64, "base64");
+    var decoded = decodeAudioPayload(audioBase64, mimeType);
+    var audioBuffer = decoded.buffer;
     console.log("Deconstruct: analysing uploaded audio (" + (audioBuffer.length / 1024).toFixed(0) + " KB)");
     var analysis = await analyzeUploadedAudio(audioBuffer, {
       separate: req.body.separate !== false,
@@ -1737,7 +2247,7 @@ app.post("/deconstruct", rateLimit("deconstruct", 20), async function(req, res) 
       } else {
         try {
           var transcriptBuffer = audioBuffer;
-          var transcriptMime = req.body.mimeType || "audio/m4a";
+          var transcriptMime = decoded.mimeType;
           var transcriptSource = "original";
           if (analysis.stems && analysis.stems.vocals) {
             var vocals = await axios.get(analysis.stems.vocals, { responseType: "arraybuffer" });
@@ -1745,18 +2255,19 @@ app.post("/deconstruct", rateLimit("deconstruct", 20), async function(req, res) 
             transcriptMime = "audio/wav";
             transcriptSource = "vocals_stem";
           }
-          var ext = transcriptMime.includes("wav") ? "wav" : (transcriptMime.includes("mp3") ? "mp3" : "m4a");
-          tempPath = path.join(os.tmpdir(), "deconstruct_transcribe_" + Date.now() + "." + ext);
-          fs.writeFileSync(tempPath, transcriptBuffer);
+          tempPath = await prepareWhisperAudio(transcriptBuffer, transcriptMime, analysis.stems && analysis.stems.vocals);
           var tr = await openai.audio.transcriptions.create({
             file: fs.createReadStream(tempPath),
             model: "whisper-1",
             response_format: "verbose_json",
+            timestamp_granularities: ["segment", "word"],
           });
           analysis.lyrics = {
             transcript: tr.text || "",
             language: tr.language || null,
             source: transcriptSource,
+            segments: tr.segments || [],
+            words: tr.words || [],
           };
           analysis.stagesRun.push("lyrics");
           delete analysis.stagesSkipped.lyrics;
@@ -1772,13 +2283,13 @@ app.post("/deconstruct", rateLimit("deconstruct", 20), async function(req, res) 
       ok: true,
       input: {
         bytes: audioBuffer.length,
-        mimeType: req.body.mimeType || null,
+        mimeType: decoded.mimeType,
       },
       analysis: analysis,
     });
   } catch(e) {
     console.error("Deconstruct error:", e.message);
-    res.status(500).json({ error: e.message });
+    res.status(e.httpStatus || 500).json({ error: e.message });
   } finally {
     if (tempPath) {
       try { fs.unlinkSync(tempPath); } catch(_) {}
@@ -1821,27 +2332,36 @@ app.post("/transcribe", rateLimit("transcribe", 50), async function(req, res) {
   var mimeType    = req.body.mimeType || "audio/m4a";
   if (!audioBase64) return res.status(400).json({ error: "No audio provided" });
 
-  var ext      = (mimeType.includes("mp4") || mimeType.includes("m4a")) ? "m4a" : "wav";
-  var tempPath = path.join(os.tmpdir(), "transcribe_" + Date.now() + "." + ext);
+  var tempPath = null;
 
   try {
-    var audioBuffer = Buffer.from(audioBase64, "base64");
-    fs.writeFileSync(tempPath, audioBuffer);
+    var decoded = decodeAudioPayload(audioBase64, mimeType);
+    var audioBuffer = decoded.buffer;
+    tempPath = await prepareWhisperAudio(audioBuffer, decoded.mimeType);
     console.log("Whisper: transcribing " + (audioBuffer.length / 1024).toFixed(0) + " KB");
 
     var response = await openai.audio.transcriptions.create({
       file:            fs.createReadStream(tempPath),
       model:           "whisper-1",
       response_format: "verbose_json",
+      timestamp_granularities: ["segment", "word"],
     });
 
     console.log("Whisper: language=" + response.language + " chars=" + (response.text || "").length);
-    res.json({ transcript: response.text, language: response.language });
+    res.json({
+      transcript: response.text,
+      language: response.language,
+      duration: response.duration || null,
+      segments: response.segments || [],
+      words: response.words || [],
+    });
   } catch(e) {
     console.error("Transcribe error:", e.message);
-    res.status(500).json({ error: e.message });
+    res.status(e.httpStatus || 500).json({ error: e.message });
   } finally {
-    try { fs.unlinkSync(tempPath); } catch(_) {}
+    if (tempPath) {
+      try { fs.unlinkSync(tempPath); } catch(_) {}
+    }
   }
 });
 
@@ -1851,5 +2371,16 @@ if (require.main === module) {
 
 // exposed for test scripts only — `node server.js` is the real entry point
 module.exports = {
-  _internals: { generateChartWithAI, fetchChartFromAudioAnalysis, fetchChartFromSources, fetchRealLyrics, saveChartToDB },
+  _internals: {
+    generateChartWithAI,
+    fetchChartFromAudioAnalysis,
+    fetchChartFromSources,
+    fetchRealLyrics,
+    saveChartToDB,
+    transcriptionToTimedLines,
+    buildStaticChartFromTranscription,
+    buildChordOnlyChart,
+    validateAndRepairChart,
+    audioExtensionForMime,
+  },
 };
