@@ -37,6 +37,7 @@ function localAdd(song: Omit<HistorySong, "viewedAt">, viewedAt: number): void {
 }
 
 async function cloudUserId(): Promise<string | null> {
+  if (!supabase) return null;
   const {
     data: { session },
   } = await supabase.auth.getSession();
@@ -48,6 +49,7 @@ async function cloudAdd(
   song: Omit<HistorySong, "viewedAt">,
   viewedAt: number
 ): Promise<void> {
+  if (!supabase) return;
   try {
     await supabase.from("user_songs").upsert(
       {
@@ -66,6 +68,7 @@ async function cloudAdd(
 }
 
 async function cloudGet(userId: string): Promise<HistorySong[]> {
+  if (!supabase) return [];
   try {
     const { data, error } = await supabase
       .from("user_songs")
@@ -109,7 +112,7 @@ export async function getHistory(): Promise<HistorySong[]> {
 export async function clearHistory(): Promise<void> {
   if (typeof window !== "undefined") localStorage.removeItem(LOCAL_KEY);
   const userId = await cloudUserId();
-  if (userId)
+  if (userId && supabase)
     void supabase
       .from("user_songs")
       .delete()

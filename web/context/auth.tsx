@@ -24,22 +24,31 @@ const AuthContext = createContext<AuthCtx | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(Boolean(supabase));
 
   useEffect(() => {
+    if (!supabase) return;
+
+    let active = true;
     supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
-      setLoading(false);
+      if (active) {
+        setSession(data.session);
+        setLoading(false);
+      }
     });
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, s) => {
       setSession(s);
     });
-    return () => subscription.unsubscribe();
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
   const signIn = async (email: string, password: string) => {
+    if (!supabase) throw new Error("Account sign-in is not configured yet.");
     const { error } = await supabase.auth.signInWithPassword({
       email,
       password,
@@ -49,13 +58,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signUp = async (email: string, password: string) => {
+    if (!supabase) throw new Error("Account registration is not configured yet.");
     const { error } = await supabase.auth.signUp({ email, password });
     if (error) throw new Error(error.message);
     clearGate();
   };
 
   const signOut = async () => {
-    await supabase.auth.signOut();
+    if (supabase) await supabase.auth.signOut();
   };
 
   return (
