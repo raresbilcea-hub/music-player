@@ -204,6 +204,54 @@ function rowIsUnverifiedPartial(row) {
   }, row.source);
 }
 
+function rowIsReplaceableUnverified(row) {
+  if (!row || row.verified === true) return false;
+  if (rowIsUnverifiedPartial(row)) return true;
+  return audioTranscriptionChartIsWeak({
+    sections: row.sections,
+    source: row.source,
+  }, row.source);
+}
+
+// Audio-only lyrics are useful only when the timed transcript represents the
+// whole recording. Older rows were saved after a very permissive six-line /
+// thirty-word check, so a sparse Whisper result could be cached as a complete
+// chart. Rebuild the timed transcript from the stored chart and run the same
+// quality gate used before a new chart is created.
+function audioTranscriptionChartIsWeak(chart, source) {
+  if (String(source || chart && chart.source || "") !== "audio_transcription") return false;
+  var sections = chart && Array.isArray(chart.sections) ? chart.sections : [];
+  var metadata = sections[0] || {};
+  var expectedDuration = Number(metadata.transcriptExpectedDuration);
+  // Rows written before the stricter completeness gate did not retain the
+  // full analysis duration. Their final lyric timestamp is not trustworthy as
+  // a substitute: a transcript of only the first 90 seconds would otherwise
+  // appear complete. Unverified legacy rows are therefore regenerated.
+  if (!Number.isFinite(expectedDuration) || expectedDuration <= 0) return true;
+  var segments = [];
+  var words = [];
+  sections.forEach(function (section) {
+    var lines = section && Array.isArray(section.lines) ? section.lines : [];
+    lines.forEach(function (line) {
+      var start = Number(line && line.start);
+      var end = Number(line && line.end);
+      var text = cleanTranscribedLine(line && line.lyrics);
+      if (text && Number.isFinite(start) && Number.isFinite(end) && end > start) {
+        segments.push({ text: text, start: start, end: end });
+      }
+      (Array.isArray(line && line.words) ? line.words : []).forEach(function (word) {
+        var wordStart = Number(word && word.start);
+        var wordEnd = Number(word && word.end);
+        var value = String(word && word.word || "").trim();
+        if (!value || !Number.isFinite(wordStart) || !Number.isFinite(wordEnd)) return;
+        words.push({ word: value, start: wordStart, end: wordEnd });
+      });
+    });
+  });
+  if (segments.length === 0) return true;
+  return !assessTranscription({ segments: segments, words: words, duration: expectedDuration }, expectedDuration).accepted;
+}
+
 // Emit only bounded control-flow metadata. Do not add provider response
 // bodies, URLs, transcript text, audio content, or credentials here.
 function logPipelineDiagnostic(event, details) {
@@ -278,6 +326,10 @@ async function fetchChartFromDB(title, artist) {
     }
     if (rowIsUnverifiedPartial(candidate)) {
       console.warn("Ignoring cached unverified partial chart for", candidate.title, "by", candidate.artist);
+      continue;
+    }
+    if (candidate.verified !== true && audioTranscriptionChartIsWeak(candidateChart, candidate.source)) {
+      console.warn("Ignoring cached weak audio transcription for", candidate.title, "by", candidate.artist);
       continue;
     }
     if (chartContainsLyricsRefusal(candidateChart)) {
@@ -585,6 +637,10 @@ function validateAndRepairChart(chart) {
     var cleanSection = { label: String(s.label || "Verse"), lines: cleanLines };
     if (s.transcriptLanguage) cleanSection.transcriptLanguage = String(s.transcriptLanguage);
     if (s.transcriptSource) cleanSection.transcriptSource = String(s.transcriptSource);
+    var transcriptExpectedDuration = Number(s.transcriptExpectedDuration);
+    if (Number.isFinite(transcriptExpectedDuration) && transcriptExpectedDuration > 0) {
+      cleanSection.transcriptExpectedDuration = transcriptExpectedDuration;
+    }
     if (s.warning) cleanSection.warning = String(s.warning);
     out.sections.push(cleanSection);
   }
@@ -992,17 +1048,53 @@ function transcriptionToTimedLines(transcription) {
 
 function assessTranscription(transcription, expectedDuration) {
   var lines = transcriptionToTimedLines(transcription || {});
-  if (lines.length < 6) {
-    return { accepted: false, reason: "fewer than six usable lyric lines", lines: lines, lexicalWordCount: 0 };
-  }
-
   var lexicalWords = [];
   lines.forEach(function (line) {
     var matches = String(line.text || "").match(/[\p{L}\p{N}][\p{L}\p{M}\p{N}'’\-]*/gu);
     if (matches) lexicalWords = lexicalWords.concat(matches);
   });
-  if (lexicalWords.length < 30) {
-    return { accepted: false, reason: "fewer than thirty lexical words", lines: lines, lexicalWordCount: lexicalWords.length };
+
+  var duration = Number(expectedDuration || (transcription && transcription.duration));
+  var requiredLineCount = 6;
+  var requiredWordCount = 30;
+  if (Number.isFinite(duration) && duration > MAX_TRANSCRIBE_AUDIO_SECONDS) {
+    return {
+      accepted: false,
+      reason: "recording exceeds the full-track transcription limit",
+      lines: lines,
+      lexicalWordCount: lexicalWords.length,
+      requiredLineCount: requiredLineCount,
+      requiredWordCount: requiredWordCount,
+    };
+  }
+  if (Number.isFinite(duration) && duration >= 60) {
+    // These deliberately conservative rates are not a claim that every song
+    // is wordy. They are a safety boundary for presenting an unverified ASR
+    // transcript as a complete static lyric sheet. Sparse songs still keep
+    // their measured chord-only partial result instead of showing invented or
+    // missing verses as complete lyrics.
+    requiredLineCount = Math.max(requiredLineCount, Math.ceil(duration / 60 * 5));
+    requiredWordCount = Math.max(requiredWordCount, Math.ceil(duration / 60 * 24));
+  }
+  if (lines.length < requiredLineCount) {
+    return {
+      accepted: false,
+      reason: "too few usable lyric lines for the recording length",
+      lines: lines,
+      lexicalWordCount: lexicalWords.length,
+      requiredLineCount: requiredLineCount,
+      requiredWordCount: requiredWordCount,
+    };
+  }
+  if (lexicalWords.length < requiredWordCount) {
+    return {
+      accepted: false,
+      reason: "too few lexical words for the recording length",
+      lines: lines,
+      lexicalWordCount: lexicalWords.length,
+      requiredLineCount: requiredLineCount,
+      requiredWordCount: requiredWordCount,
+    };
   }
 
   var previousStart = -Infinity;
@@ -1028,7 +1120,6 @@ function assessTranscription(transcription, expectedDuration) {
     previousWordStart = wordStart;
   }
 
-  var duration = Number(expectedDuration || (transcription && transcription.duration));
   var transcriptSpan = lines[lines.length - 1].end - lines[0].start;
   if (Number.isFinite(duration) && duration >= 20) {
     var minimumSpan = Math.min(90, duration * 0.35);
@@ -1042,7 +1133,14 @@ function assessTranscription(transcription, expectedDuration) {
     }
   }
 
-  return { accepted: true, reason: null, lines: lines, lexicalWordCount: lexicalWords.length };
+  return {
+    accepted: true,
+    reason: null,
+    lines: lines,
+    lexicalWordCount: lexicalWords.length,
+    requiredLineCount: requiredLineCount,
+    requiredWordCount: requiredWordCount,
+  };
 }
 
 function classifyWhisperFailure(error, stage) {
@@ -1062,7 +1160,43 @@ function classifyWhisperFailure(error, stage) {
   };
 }
 
-async function transcribeVocalsStem(vocalsUrl) {
+function normalizeWhisperTranscription(transcription) {
+  return {
+    text: cleanTranscribedLine(transcription.text),
+    language: transcription.language || null,
+    duration: Number.isFinite(Number(transcription.duration)) ? Number(transcription.duration) : null,
+    segments: Array.isArray(transcription.segments) ? transcription.segments.map(function (segment) {
+      return {
+        text: cleanTranscribedLine(segment.text),
+        start: Number(segment.start),
+        end: Number(segment.end),
+      };
+    }).filter(function (segment) { return segment.text && Number.isFinite(segment.start) && Number.isFinite(segment.end); }) : [],
+    words: Array.isArray(transcription.words) ? transcription.words.map(function (word) {
+      return { word: String(word.word || "").trim(), start: Number(word.start), end: Number(word.end) };
+    }).filter(function (word) { return word.word && Number.isFinite(word.start) && Number.isFinite(word.end); }) : [],
+  };
+}
+
+function transcriptionQualityScore(transcription) {
+  var acceptance = transcription && transcription.acceptance || assessTranscription(transcription || {});
+  return (acceptance.accepted ? 1000000 : 0) +
+    (acceptance.lexicalWordCount || 0) * 10 +
+    (acceptance.lines ? acceptance.lines.length : 0);
+}
+
+async function requestWhisperTranscription(preparedPath, prompt) {
+  var request = {
+    file: fs.createReadStream(preparedPath),
+    model: "whisper-1",
+    response_format: "verbose_json",
+    timestamp_granularities: ["segment", "word"],
+  };
+  if (prompt) request.prompt = prompt;
+  return normalizeWhisperTranscription(await openai.audio.transcriptions.create(request));
+}
+
+async function transcribeVocalsStem(vocalsUrl, songContext) {
   if (!vocalsUrl) return { ok: false, failure: { stage: "input", reason: "vocals_stem_unavailable", httpStatus: null } };
   if (!process.env.OPENAI_API_KEY) return { ok: false, failure: { stage: "configuration", reason: "openai_not_configured", httpStatus: null } };
   var preparedPath = null;
@@ -1079,28 +1213,32 @@ async function transcribeVocalsStem(vocalsUrl) {
     stage = "prepare_audio";
     preparedPath = await prepareWhisperAudio(Buffer.from(response.data), contentType, vocalsUrl);
     stage = "whisper_request";
-    var transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(preparedPath),
-      model: "whisper-1",
-      response_format: "verbose_json",
-      timestamp_granularities: ["segment", "word"],
-    });
-    var result = {
-      text: cleanTranscribedLine(transcription.text),
-      language: transcription.language || null,
-      duration: Number.isFinite(Number(transcription.duration)) ? Number(transcription.duration) : null,
-      segments: Array.isArray(transcription.segments) ? transcription.segments.map(function (segment) {
-        return {
-          text: cleanTranscribedLine(segment.text),
-          start: Number(segment.start),
-          end: Number(segment.end),
-        };
-      }).filter(function (segment) { return segment.text && Number.isFinite(segment.start) && Number.isFinite(segment.end); }) : [],
-      words: Array.isArray(transcription.words) ? transcription.words.map(function (word) {
-        return { word: String(word.word || "").trim(), start: Number(word.start), end: Number(word.end) };
-      }).filter(function (word) { return word.word && Number.isFinite(word.start) && Number.isFinite(word.end); }) : [],
-    };
-    result.acceptance = assessTranscription(result);
+    var result = await requestWhisperTranscription(preparedPath, null);
+    var expectedDuration = Number(songContext && songContext.expectedDuration);
+    result.acceptance = assessTranscription(result, expectedDuration);
+    if (!result.acceptance.accepted && (result.text || result.segments.length > 0)) {
+      // One bounded retry gives Whisper the song identity and makes the
+      // completeness requirement explicit. `prompt` is a supported Whisper
+      // transcription parameter; no guessed language code or unsupported
+      // decoding option is sent. We retain whichever pass has more usable
+      // timed content, but neither pass bypasses the quality gate.
+      var context = songContext || {};
+      var identity = [context.title, context.artist].filter(Boolean).join(" by ");
+      var retryPrompt = "Complete isolated lead vocals" + (identity ? " for " + identity : "") +
+        ". Transcribe every sung line in its original language, including repeated verses and choruses.";
+      console.log("Lyrics: first Whisper pass was incomplete; retrying once with song context");
+      try {
+        var retried = await requestWhisperTranscription(preparedPath, retryPrompt);
+        retried.acceptance = assessTranscription(retried, expectedDuration);
+        if (transcriptionQualityScore(retried) > transcriptionQualityScore(result)) result = retried;
+      } catch (retryError) {
+        // The first pass remains useful diagnostic input and may still drive
+        // the chord-only fallback. A failed optional retry must not erase it.
+        var retryFailure = classifyWhisperFailure(retryError, "whisper_request");
+        logPipelineDiagnostic("whisper_retry_failure", retryFailure);
+        console.warn("Lyrics: optional Whisper retry failed; keeping the first pass (" + retryFailure.reason + ")");
+      }
+    }
     console.log(
       "Lyrics: Whisper detected " + (result.language || "unknown language") +
       " and returned " + result.segments.length + " segments / " + result.words.length +
@@ -1230,7 +1368,11 @@ function chordsForTimedLine(line, timeline) {
 }
 
 function buildStaticChartFromTranscription(title, artist, detectedChords, transcription, musicalKey, tempo) {
-  var acceptance = assessTranscription(transcription, detectedChords.clipDuration);
+  var expectedDuration = Number(detectedChords && detectedChords.clipDuration);
+  if (!Number.isFinite(expectedDuration) || expectedDuration <= 0 || expectedDuration > MAX_TRANSCRIBE_AUDIO_SECONDS) {
+    return null;
+  }
+  var acceptance = assessTranscription(transcription, expectedDuration);
   if (!acceptance.accepted) return null;
   var timedLines = acceptance.lines;
   var hasChords = Array.isArray(detectedChords.timeline) && detectedChords.timeline.length > 0;
@@ -1249,6 +1391,9 @@ function buildStaticChartFromTranscription(title, artist, detectedChords, transc
     });
     return section;
   });
+  if (sections.length > 0 && Number.isFinite(Number(detectedChords.clipDuration)) && Number(detectedChords.clipDuration) > 0) {
+    sections[0].transcriptExpectedDuration = Number(detectedChords.clipDuration);
+  }
   return validateAndRepairChart({
     title: title,
     artist: artist,
@@ -1322,6 +1467,8 @@ function partialResult(chart, source, detectedChords, reason, warning) {
     whisper_rejected_audio: "Whisper could not process the separated vocals",
     whisper_request_failed: "Whisper could not complete the transcription request",
     whisper_empty_transcript: "Whisper returned no lyric text",
+    recording_exceeds_transcription_limit: "The recording is longer than the 10-minute full-track transcription limit, so incomplete lyrics were not shown.",
+    recording_duration_unavailable: "The full recording duration could not be verified, so incomplete lyrics were not shown.",
   };
   var detail = transcriptionReasonLabels[reason] ||
     (String(reason || "").indexOf("whisper_incomplete_") === 0
@@ -1559,12 +1706,23 @@ async function fetchChartFromAudioAnalysis(title, artist, releaseDate, realLyric
   // Only use lyrics transcribed from the recording when no verified catalog
   // lyrics exist and the transcript passes a full-song completeness gate.
   var transcriptionOutcome;
+  var analysisDuration = Number(detectedChords.clipDuration);
   if (!detectedChords.vocalsUrl) {
     transcriptionOutcome = { ok: false, failure: { stage: "input", reason: "vocals_stem_unavailable", httpStatus: null } };
+  } else if (!Number.isFinite(analysisDuration) || analysisDuration <= 0) {
+    transcriptionOutcome = { ok: false, failure: { stage: "input", reason: "recording_duration_unavailable", httpStatus: null } };
+  } else if (analysisDuration > MAX_TRANSCRIBE_AUDIO_SECONDS) {
+    // prepareWhisperAudio intentionally caps a request at ten minutes. Never
+    // send that truncated file through the full-chart path for a longer song.
+    transcriptionOutcome = { ok: false, failure: { stage: "input", reason: "recording_exceeds_transcription_limit", httpStatus: null } };
   } else if (!ALLOW_CATALOG_LYRICS_TRANSCRIPTION) {
     transcriptionOutcome = { ok: false, failure: { stage: "configuration", reason: "catalog_transcription_disabled", httpStatus: null } };
   } else {
-    transcriptionOutcome = await transcribeVocalsStem(detectedChords.vocalsUrl);
+    transcriptionOutcome = await transcribeVocalsStem(detectedChords.vocalsUrl, {
+      title: title,
+      artist: artist,
+      expectedDuration: analysisDuration,
+    });
   }
   if (detectedChords.vocalsUrl && !ALLOW_CATALOG_LYRICS_TRANSCRIPTION) {
     console.log("Lyrics: catalog transcription is disabled by ALLOW_CATALOG_LYRICS_TRANSCRIPTION");
@@ -1653,6 +1811,13 @@ async function fetchChartFromAudioAnalysis(title, artist, releaseDate, realLyric
 
 async function saveChartToDB(chart, title, artist, source) {
   if (chartContainsLyricsRefusal(chart)) throw lyricsUnavailableError();
+  if (audioTranscriptionChartIsWeak(chart, source)) {
+    logPipelineDiagnostic("weak_audio_transcription_not_cached", {
+      sourceClip: chart.sourceClip,
+      reason: "incomplete_timed_transcript",
+    });
+    return { saved: false, reason: "weak_audio_transcription_not_cached" };
+  }
   if (chartHasPartialMarker(chart, source)) {
     logPipelineDiagnostic("partial_chart_not_cached", {
       sourceClip: chart.sourceClip,
@@ -1694,7 +1859,7 @@ async function saveChartToDB(chart, title, artist, source) {
     play_count:  1
   };
 
-  var partialRow = matchingRows.find(rowIsUnverifiedPartial);
+  var partialRow = matchingRows.find(rowIsReplaceableUnverified);
   if (partialRow) {
     var updateQuery = supabase
       .from("chord_charts")
@@ -2818,6 +2983,8 @@ module.exports = {
     audioExtensionForMime,
     chartHasPartialMarker,
     rowIsUnverifiedPartial,
+    rowIsReplaceableUnverified,
+    audioTranscriptionChartIsWeak,
     classifyWhisperFailure,
     diagnosticReason,
   },
