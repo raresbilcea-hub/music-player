@@ -211,7 +211,19 @@ function SongPageInner() {
     );
   }
 
-  const canEdit = isAuthenticated && Boolean(session?.access_token);
+  const appMetadata = session?.user.app_metadata;
+  const appRoles = [
+    appMetadata?.role,
+    ...(Array.isArray(appMetadata?.roles) ? appMetadata.roles : []),
+  ];
+  const canEdit = Boolean(
+    session?.access_token &&
+      appRoles.some(
+        (role) =>
+          typeof role === "string" &&
+          ["chart_editor", "admin"].includes(role.toLowerCase())
+      )
+  );
   const editing = editMode && canEdit && session?.access_token === editSessionToken;
   const shown = editing && draft ? draft : chart;
 

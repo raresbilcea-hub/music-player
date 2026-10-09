@@ -2443,8 +2443,21 @@ async function requireAuthenticatedUser(req, res, next) {
   }
 }
 
-// PUT /chords { title, artist, sections, musicalKey, tempo, capo } — authenticated user correction, marks verified
-app.put("/chords", requireAuthenticatedUser, rateLimit("chord-corrections", 30), async function(req, res) {
+function requireChartEditor(req, res, next) {
+  var metadata = req.authUser && req.authUser.app_metadata ? req.authUser.app_metadata : {};
+  var roles = Array.isArray(metadata.roles) ? metadata.roles : [];
+  var role = typeof metadata.role === "string" ? metadata.role : "";
+  var allowed = [role].concat(roles).some(function (candidate) {
+    return typeof candidate === "string" && ["chart_editor", "admin"].includes(candidate.toLowerCase());
+  });
+  if (!allowed) {
+    return res.status(403).json({ error: "Chord chart editing is limited to authorized editors.", code: "CHART_EDITOR_REQUIRED" });
+  }
+  next();
+}
+
+// Only a server-granted app_metadata role may publish a correction as verified.
+app.put("/chords", requireAuthenticatedUser, requireChartEditor, rateLimit("chord-corrections", 30), async function(req, res) {
   res.setHeader("Content-Type", "application/json");
   var title = req.body.title, artist = req.body.artist;
   var sections = req.body.sections, musicalKey = req.body.musicalKey;
