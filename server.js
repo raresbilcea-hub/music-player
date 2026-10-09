@@ -1293,8 +1293,21 @@ function partialResult(chart, source, detectedChords, reason, warning) {
   var sourceReasonLabels = {
     yt_dlp_unavailable: "the full-song downloader is unavailable",
     youtube_search_failed: "the full-song search failed",
+    youtube_search_blocked: "YouTube blocked the full-song search from the backend",
+    youtube_search_network_failed: "the backend could not reach YouTube for the full-song search",
+    youtube_search_extractor_failed: "yt-dlp could not read YouTube search results",
+    youtube_search_execution_failed: "the full-song search could not run successfully",
+    youtube_search_timeout: "the full-song search timed out",
+    youtube_search_no_results: "YouTube returned no results for the full-song search",
+    youtube_no_identity_match: "YouTube results did not reliably match both the song and artist",
     youtube_no_matching_result: "no matching full-length recording was found",
+    youtube_no_full_length_result: "matching YouTube results were previews or were outside the supported song length",
     youtube_download_failed: "the full-song download failed",
+    youtube_download_blocked: "YouTube blocked the full-song download from the backend",
+    youtube_download_network_failed: "the backend could not download the full song from YouTube",
+    youtube_download_extractor_failed: "yt-dlp could not read the selected YouTube recording",
+    youtube_download_execution_failed: "the full-song download could not run successfully",
+    youtube_download_timeout: "the full-song download timed out",
     youtube_full_path_exception: "the full-song download could not be completed",
   };
   var transcriptionReasonLabels = {

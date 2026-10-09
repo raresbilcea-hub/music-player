@@ -59,7 +59,10 @@ function normalizeForMatch(s) {
 // fields describe control flow only; they never include URLs, provider
 // responses, audio bytes, lyrics, or credentials.
 function logAudioDiagnostic(event, details) {
-  var allowed = ["sourceClip", "fallbackReason", "stage", "reason"];
+  var allowed = [
+    "sourceClip", "fallbackReason", "stage", "reason",
+    "executableSource", "executableVersion", "queryVariant", "attemptCount",
+  ];
   var payload = { component: "audio_analysis", event: String(event || "unknown") };
   details = details || {};
   allowed.forEach(function (key) {
@@ -128,69 +131,199 @@ async function downloadBuffer(url) {
 // Resolve yt-dlp: a system install (brew locally, nixpacks on Railway —
 // see nixpacks.toml) is preferred; the npm-bundled zipapp works wherever
 // Python >= 3.10 exists.
-var YT_DLP_CANDIDATES = [
-  process.env.YT_DLP_PATH,
-  "/opt/homebrew/bin/yt-dlp",
-  "/usr/local/bin/yt-dlp",
-  "/usr/bin/yt-dlp",
-  path.join(__dirname, "node_modules", "youtube-dl-exec", "bin", "yt-dlp"),
-].filter(Boolean);
-
-function resolveYtDlp() {
-  for (var i = 0; i < YT_DLP_CANDIDATES.length; i++) {
-    if (fs.existsSync(YT_DLP_CANDIDATES[i])) return YT_DLP_CANDIDATES[i];
+function isExecutableFile(candidate) {
+  if (!candidate) return false;
+  try {
+    return fs.statSync(candidate).isFile() && (fs.accessSync(candidate, fs.constants.X_OK), true);
+  } catch (_) {
+    return false;
   }
+}
+
+// Nixpacks exposes installed packages through PATH. Resolve that location
+// before the npm zipapp: the system package carries its own Python runtime and
+// is considerably more reliable in Railway containers.
+function resolveYtDlp() {
+  if (isExecutableFile(process.env.YT_DLP_PATH)) {
+    return { executable: process.env.YT_DLP_PATH, source: "environment" };
+  }
+
+  var pathEntries = String(process.env.PATH || "").split(path.delimiter).filter(Boolean);
+  for (var i = 0; i < pathEntries.length; i++) {
+    var pathCandidate = path.join(pathEntries[i], process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+    if (isExecutableFile(pathCandidate)) return { executable: pathCandidate, source: "path" };
+  }
+
+  var staticCandidates = [
+    "/nix/var/nix/profiles/default/bin/yt-dlp",
+    "/root/.nix-profile/bin/yt-dlp",
+    "/home/railway/.nix-profile/bin/yt-dlp",
+    "/opt/homebrew/bin/yt-dlp",
+    "/usr/local/bin/yt-dlp",
+    "/usr/bin/yt-dlp",
+  ];
+  for (var j = 0; j < staticCandidates.length; j++) {
+    if (isExecutableFile(staticCandidates[j])) return { executable: staticCandidates[j], source: "system_fallback" };
+  }
+
+  var npmCandidate = path.join(__dirname, "node_modules", "youtube-dl-exec", "bin", "yt-dlp");
+  if (isExecutableFile(npmCandidate)) return { executable: npmCandidate, source: "npm_zipapp" };
   return null;
 }
 
-function runYtDlp(args, timeoutMs) {
+function runYtDlp(args, timeoutMs, resolvedYtDlp) {
   return new Promise(function (resolve) {
-    execFile(resolveYtDlp(), args, { timeout: timeoutMs || 180000, maxBuffer: 10 * 1024 * 1024 }, function (err, stdout, stderr) {
+    var resolved = resolvedYtDlp || resolveYtDlp();
+    if (!resolved) {
+      resolve({ err: new Error("yt-dlp unavailable"), stdout: "", stderr: "" });
+      return;
+    }
+    execFile(resolved.executable, args, { timeout: timeoutMs || 180000, maxBuffer: 10 * 1024 * 1024 }, function (err, stdout, stderr) {
       resolve({ err: err, stdout: String(stdout || ""), stderr: String(stderr || "") });
     });
   });
 }
 
+function safeYtDlpVersion(stdout) {
+  var version = String(stdout || "").trim().split(/\r?\n/)[0] || "unknown";
+  return /^[0-9A-Za-z._+-]{1,64}$/.test(version) ? version : "unknown";
+}
+
+function categorizeYtDlpFailure(result, stage) {
+  var text = String((result && result.stderr) || "") + " " + String(result && result.err && result.err.message || "");
+  text = text.toLowerCase();
+  if (result && result.err && (result.err.killed || result.err.signal)) return stage + "_timeout";
+  if (/sign in|confirm you.re not a bot|http error 403|http error 429|too many requests/.test(text)) return stage + "_blocked";
+  if (/timed out|timeout|network is unreachable|connection refused|temporary failure|name or service not known/.test(text)) return stage + "_network_failed";
+  if (/unable to extract|unsupported url|extractor error/.test(text)) return stage + "_extractor_failed";
+  return stage + "_execution_failed";
+}
+
+function artistParts(artist) {
+  return String(artist || "")
+    .split(/\s*(?:\/|,|&|\bfeat(?:uring)?\.?\b|\bwith\b|\bx\b)\s*/i)
+    .map(normalizeForMatch)
+    .filter(function (part) { return part.length >= 3; });
+}
+
+function youtubeTitleMatches(candidate, title) {
+  var wantTitle = normalizeForMatch(title);
+  var normalizedTitle = normalizeForMatch(candidate.title);
+  return Boolean(wantTitle && normalizedTitle.indexOf(wantTitle) !== -1);
+}
+
+function youtubeArtistMatches(candidate, artist) {
+  // A matching title alone is not enough for generic names such as "Solo
+  // Tu". Require at least one requested artist in the video's title or
+  // provider-supplied identity metadata as well.
+  var identity = normalizeForMatch([
+    candidate.title, candidate.artist, candidate.uploader, candidate.channel,
+  ].join(" "));
+  var requestedArtists = artistParts(artist);
+  return requestedArtists.length > 0 && requestedArtists.some(function (part) {
+    return (" " + identity + " ").indexOf(" " + part + " ") !== -1;
+  });
+}
+
+function youtubeResultMatches(candidate, title, artist) {
+  return youtubeTitleMatches(candidate, title) && youtubeArtistMatches(candidate, artist);
+}
+
+function parseYoutubeProbe(stdout) {
+  var candidates = [];
+  String(stdout || "").split(/\r?\n/).forEach(function (line) {
+    var parts = line.split("\t");
+    if (parts.length < 3) return;
+    candidates.push({
+      id: parts[0],
+      duration: parseFloat(parts[1]),
+      title: parts[2] || "",
+      artist: parts[3] || "",
+      uploader: parts[4] || "",
+      channel: parts[5] || "",
+    });
+  });
+  return candidates;
+}
+
 // Download the full song from YouTube. Returns { buffer, videoTitle } or null.
 async function downloadFullSong(title, artist, diagnostics) {
-  if (!resolveYtDlp()) {
+  var ytDlp = resolveYtDlp();
+  if (!ytDlp) {
     if (diagnostics) diagnostics.reason = "yt_dlp_unavailable";
     console.log("audioAnalysis: yt-dlp not installed — full-song path unavailable");
     return null;
   }
 
-  var query = "ytsearch3:" + title + " " + artist + " official audio";
-  // Probe the search results first (cheap, metadata only) and pick the first
-  // hit whose video title actually contains the song title — same defense as
-  // the iTunes matcher: search ranking is not relevance.
-  var probe = await runYtDlp([
-    query,
-    "--print", "%(id)s\t%(duration)s\t%(title)s",
-    "--no-playlist", "--no-warnings", "--skip-download",
-  ], 60000);
-  if (probe.err) {
-    if (diagnostics) diagnostics.reason = "youtube_search_failed";
-    console.log("audioAnalysis: YouTube search failed:", (probe.stderr || probe.err.message).split("\n")[0]);
-    return null;
-  }
-
-  var wantTitle = normalizeForMatch(title);
-  var chosen = null;
-  probe.stdout.split("\n").forEach(function (line) {
-    if (chosen) return;
-    var parts = line.split("\t");
-    if (parts.length < 3) return;
-    var duration = parseFloat(parts[1]);
-    var videoTitle = parts.slice(2).join("\t");
-    if (!duration || duration > MAX_SONG_SECONDS || duration < 60) return;
-    if (normalizeForMatch(videoTitle).indexOf(wantTitle) === -1) return;
-    chosen = { id: parts[0], duration: duration, title: videoTitle };
+  var versionResult = await runYtDlp(["--version"], 10000, ytDlp);
+  var executableVersion = versionResult.err ? "unknown" : safeYtDlpVersion(versionResult.stdout);
+  logAudioDiagnostic("yt_dlp_resolved", {
+    stage: "youtube_source",
+    executableSource: ytDlp.source,
+    executableVersion: executableVersion,
   });
+
+  // Search metadata only. A single unavailable/broken result must not poison
+  // the whole search, and a bounded plain title+artist query covers releases
+  // whose official upload is not labelled "official audio".
+  var searches = [
+    { variant: "official_audio", query: "ytsearch5:" + title + " " + artist + " official audio" },
+    { variant: "title_artist", query: "ytsearch5:" + title + " " + artist },
+  ];
+  var chosen = null;
+  var searchFailure = null;
+  var sawCandidates = false;
+  var sawTitleMatch = false;
+  var sawIdentityMatch = false;
+  var chosenVariant = null;
+  for (var searchIndex = 0; searchIndex < searches.length && !chosen; searchIndex++) {
+    var search = searches[searchIndex];
+    var probe = await runYtDlp([
+      search.query,
+      "--print", "%(id)s\t%(duration)s\t%(title)s\t%(artist)s\t%(uploader)s\t%(channel)s",
+      "--no-playlist", "--no-warnings", "--skip-download", "--ignore-errors",
+      "--socket-timeout", "15", "--retries", "2", "--extractor-retries", "2",
+    ], 60000, ytDlp);
+    var candidates = parseYoutubeProbe(probe.stdout);
+    if (candidates.length) sawCandidates = true;
+    for (var candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+      var candidate = candidates[candidateIndex];
+      if (!youtubeTitleMatches(candidate, title)) continue;
+      sawTitleMatch = true;
+      if (!youtubeArtistMatches(candidate, artist)) continue;
+      sawIdentityMatch = true;
+      if (!candidate.duration || candidate.duration > MAX_SONG_SECONDS || candidate.duration < 60) continue;
+      chosen = candidate;
+      chosenVariant = search.variant;
+      break;
+    }
+    if (probe.err) searchFailure = categorizeYtDlpFailure(probe, "youtube_search");
+  }
   if (!chosen) {
-    if (diagnostics) diagnostics.reason = "youtube_no_matching_result";
+    var searchReason = !sawCandidates
+      ? (searchFailure || "youtube_search_no_results")
+      : !sawTitleMatch
+        ? "youtube_no_matching_result"
+        : !sawIdentityMatch
+          ? "youtube_no_identity_match"
+          : "youtube_no_full_length_result";
+    if (diagnostics) diagnostics.reason = searchReason;
+    logAudioDiagnostic("youtube_source_failed", {
+      stage: "metadata_search",
+      reason: searchReason,
+      executableSource: ytDlp.source,
+      executableVersion: executableVersion,
+      attemptCount: searches.length,
+    });
     console.log("audioAnalysis: no YouTube result matched '" + title + "' — falling back to preview");
     return null;
   }
+  logAudioDiagnostic("youtube_source_matched", {
+    stage: "metadata_search",
+    queryVariant: chosenVariant,
+    executableSource: ytDlp.source,
+    executableVersion: executableVersion,
+  });
   console.log("audioAnalysis: downloading full song from YouTube: \"" + chosen.title + "\" (" + Math.round(chosen.duration) + "s)");
 
   var outPath = path.join(os.tmpdir(), "fullsong-" + crypto.randomUUID() + ".mp3");
@@ -202,10 +335,18 @@ async function downloadFullSong(title, artist, diagnostics) {
     "--no-playlist", "--no-warnings",
     "--ffmpeg-location", ffmpegPath,
     "-o", outPath,
-  ], 240000);
+  ], 240000, ytDlp);
   if (dl.err || !fs.existsSync(outPath)) {
-    if (diagnostics) diagnostics.reason = "youtube_download_failed";
-    console.log("audioAnalysis: YouTube download failed:", (dl.stderr || (dl.err && dl.err.message) || "no output file").split("\n")[0]);
+    var downloadReason = categorizeYtDlpFailure(dl, "youtube_download");
+    if (diagnostics) diagnostics.reason = downloadReason;
+    logAudioDiagnostic("youtube_source_failed", {
+      stage: "audio_download",
+      reason: downloadReason,
+      executableSource: ytDlp.source,
+      executableVersion: executableVersion,
+      queryVariant: chosenVariant,
+    });
+    console.log("audioAnalysis: YouTube download failed (" + downloadReason + ")");
     try { fs.unlinkSync(outPath); } catch (_) {}
     return null;
   }
@@ -851,5 +992,5 @@ module.exports = {
   captureGate,
   analyzeUploadedAudio,
   // exposed for test scripts only
-  _internals: { detectChordsFromAudio, smoothChordTimeline, summarizeTimeline, isDiatonic, findItunesPreview, downloadFullSong, runDemucs, downloadBuffer, convertToWav, readWavAsFloat32 },
+  _internals: { detectChordsFromAudio, smoothChordTimeline, summarizeTimeline, isDiatonic, findItunesPreview, downloadFullSong, resolveYtDlp, youtubeResultMatches, parseYoutubeProbe, runDemucs, downloadBuffer, convertToWav, readWavAsFloat32 },
 };
