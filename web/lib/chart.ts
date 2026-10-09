@@ -37,6 +37,8 @@ export type ChordChart = {
   source?: string;
   partial?: boolean;
   warning?: string;
+  sourceClip?: string;
+  partialReason?: string;
   transcriptLanguage?: string | null;
 };
 

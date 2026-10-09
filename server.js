@@ -182,6 +182,45 @@ function chartHasLyrics(chart) {
   });
 }
 
+function chartHasPartialMarker(chart, source) {
+  if (!chart) return false;
+  if (chart.partial === true) return true;
+  var sourceName = String(source || chart.source || "");
+  if (/_partial$/i.test(sourceName)) return true;
+  var sections = Array.isArray(chart.sections) ? chart.sections : [];
+  if (sections.some(function (section) {
+    return section && (section.partial === true || String(section.warning || "").trim());
+  })) return true;
+  // Legacy chord-only rows predate explicit partial metadata. For this app a
+  // chart with no lyric text is not a complete static lyrics/chords chart.
+  return !chartHasLyrics(chart);
+}
+
+function rowIsUnverifiedPartial(row) {
+  if (!row || row.verified === true) return false;
+  return chartHasPartialMarker({
+    sections: row.sections,
+    source: row.source,
+  }, row.source);
+}
+
+// Emit only bounded control-flow metadata. Do not add provider response
+// bodies, URLs, transcript text, audio content, or credentials here.
+function logPipelineDiagnostic(event, details) {
+  var allowed = [
+    "sourceClip", "sourceFallbackReason", "stage", "reason", "httpStatus",
+    "segmentCount", "wordCount", "expectedDuration",
+  ];
+  var payload = { component: "lyrics_pipeline", event: String(event || "unknown") };
+  details = details || {};
+  allowed.forEach(function (key) {
+    var value = details[key];
+    if (value === undefined || value === null || value === "") return;
+    payload[key] = typeof value === "number" ? value : String(value);
+  });
+  console.log("PIPELINE_DIAGNOSTIC " + JSON.stringify(payload));
+}
+
 function lyricsUnavailableError() {
   var error = new Error("The song was found, but its vocals could not be transcribed and no usable lyric source was available. Please try another recording or try again later.");
   error.code = "LYRICS_UNAVAILABLE";
@@ -230,6 +269,16 @@ async function fetchChartFromDB(title, artist) {
     if (sectionMetadata && sectionMetadata.warning) {
       candidateChart.partial = true;
       candidateChart.warning = sectionMetadata.warning;
+    }
+    if (sectionMetadata && sectionMetadata.sourceClip) {
+      candidateChart.sourceClip = sectionMetadata.sourceClip;
+    }
+    if (sectionMetadata && sectionMetadata.partialReason) {
+      candidateChart.partialReason = sectionMetadata.partialReason;
+    }
+    if (rowIsUnverifiedPartial(candidate)) {
+      console.warn("Ignoring cached unverified partial chart for", candidate.title, "by", candidate.artist);
+      continue;
     }
     if (chartContainsLyricsRefusal(candidateChart)) {
       console.warn("Ignoring cached chart containing a lyrics refusal for", candidate.title, "by", candidate.artist);
@@ -486,6 +535,8 @@ function validateAndRepairChart(chart) {
   if (chart.partial === true) out.partial = true;
   if (chart.warning) out.warning = String(chart.warning);
   if (chart.transcriptLanguage) out.transcriptLanguage = String(chart.transcriptLanguage);
+  if (chart.sourceClip) out.sourceClip = String(chart.sourceClip);
+  if (chart.partialReason) out.partialReason = String(chart.partialReason);
   var rawSections = Array.isArray(chart.sections) ? chart.sections : [];
   for (var i = 0; i < rawSections.length; i++) {
     var s = rawSections[i] || {};
@@ -994,9 +1045,28 @@ function assessTranscription(transcription, expectedDuration) {
   return { accepted: true, reason: null, lines: lines, lexicalWordCount: lexicalWords.length };
 }
 
+function classifyWhisperFailure(error, stage) {
+  var httpStatus = Number(error && error.response && error.response.status);
+  var code = "unknown_failure";
+  if (stage === "download_vocals") code = "vocals_download_failed";
+  else if (stage === "prepare_audio") code = "audio_preparation_failed";
+  else if (httpStatus === 401 || httpStatus === 403) code = "whisper_auth_failed";
+  else if (httpStatus === 429) code = "whisper_rate_or_quota_limited";
+  else if (httpStatus === 400 || httpStatus === 413 || httpStatus === 415) code = "whisper_rejected_audio";
+  else if (error && ["ECONNABORTED", "ETIMEDOUT", "ESOCKETTIMEDOUT"].indexOf(error.code) !== -1) code = "whisper_timeout";
+  else if (stage === "whisper_request") code = "whisper_request_failed";
+  return {
+    stage: stage,
+    reason: code,
+    httpStatus: Number.isFinite(httpStatus) ? httpStatus : null,
+  };
+}
+
 async function transcribeVocalsStem(vocalsUrl) {
-  if (!vocalsUrl || !process.env.OPENAI_API_KEY) return null;
+  if (!vocalsUrl) return { ok: false, failure: { stage: "input", reason: "vocals_stem_unavailable", httpStatus: null } };
+  if (!process.env.OPENAI_API_KEY) return { ok: false, failure: { stage: "configuration", reason: "openai_not_configured", httpStatus: null } };
   var preparedPath = null;
+  var stage = "download_vocals";
   try {
     console.log("Lyrics: downloading and preparing the Demucs vocals stem for Whisper");
     var response = await axios.get(vocalsUrl, {
@@ -1006,7 +1076,9 @@ async function transcribeVocalsStem(vocalsUrl) {
       maxBodyLength: 150 * 1024 * 1024,
     });
     var contentType = response.headers && response.headers["content-type"];
+    stage = "prepare_audio";
     preparedPath = await prepareWhisperAudio(Buffer.from(response.data), contentType, vocalsUrl);
+    stage = "whisper_request";
     var transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(preparedPath),
       model: "whisper-1",
@@ -1034,10 +1106,16 @@ async function transcribeVocalsStem(vocalsUrl) {
       " and returned " + result.segments.length + " segments / " + result.words.length +
       " words; transcript " + (result.acceptance.accepted ? "accepted" : "rejected: " + result.acceptance.reason)
     );
-    return result.text || result.segments.length ? result : null;
+    if (!result.text && result.segments.length === 0) {
+      var emptyFailure = { stage: "whisper_response", reason: "whisper_empty_transcript", httpStatus: null };
+      logPipelineDiagnostic("whisper_failure", emptyFailure);
+      return { ok: false, failure: emptyFailure };
+    }
+    return { ok: true, transcription: result };
   } catch (error) {
-    console.log("Lyrics: vocals transcription failed:", error.message);
-    return null;
+    var failure = classifyWhisperFailure(error, stage);
+    logPipelineDiagnostic("whisper_failure", failure);
+    return { ok: false, failure: failure };
   } finally {
     if (preparedPath) {
       try { fs.unlinkSync(preparedPath); } catch (_) {}
@@ -1206,6 +1284,66 @@ function buildChordOnlyChart(title, artist, detectedChords, musicalKey, tempo) {
       }),
     }],
   });
+}
+
+function partialResult(chart, source, detectedChords, reason, warning) {
+  chart.partial = true;
+  chart.sourceClip = detectedChords.sourceClip || "unknown";
+  chart.partialReason = String(reason || "incomplete_audio_analysis");
+  var sourceReasonLabels = {
+    yt_dlp_unavailable: "the full-song downloader is unavailable",
+    youtube_search_failed: "the full-song search failed",
+    youtube_no_matching_result: "no matching full-length recording was found",
+    youtube_download_failed: "the full-song download failed",
+    youtube_full_path_exception: "the full-song download could not be completed",
+  };
+  var transcriptionReasonLabels = {
+    catalog_transcription_disabled: "catalog transcription is disabled on the backend",
+    openai_not_configured: "Whisper is not configured on the backend",
+    vocals_stem_unavailable: "Demucs did not provide a vocals stem",
+    vocals_download_failed: "the separated vocals could not be downloaded",
+    audio_preparation_failed: "the separated vocals could not be prepared for transcription",
+    whisper_auth_failed: "Whisper rejected the backend credentials",
+    whisper_rate_or_quota_limited: "Whisper reached a rate or usage limit",
+    whisper_timeout: "Whisper timed out while transcribing the vocals",
+    whisper_rejected_audio: "Whisper could not process the separated vocals",
+    whisper_request_failed: "Whisper could not complete the transcription request",
+    whisper_empty_transcript: "Whisper returned no lyric text",
+  };
+  var detail = transcriptionReasonLabels[reason] ||
+    (String(reason || "").indexOf("whisper_incomplete_") === 0
+      ? "Whisper returned too little usable lyric text"
+      : null);
+  if (detectedChords.sourceClip === "itunes_preview_30s") {
+    var fallbackDetail = sourceReasonLabels[detectedChords.sourceFallbackReason] ||
+      "a full-length recording was unavailable";
+    detail = "Only the 30-second iTunes preview was available because " + fallbackDetail + ".";
+  }
+  chart.warning = [warning, detail].filter(Boolean).join(" ");
+  if (chart.sections && chart.sections[0]) {
+    // Keep the diagnostic with the rendered partial result. Partial charts
+    // are not cached, but older clients read warning metadata from sections.
+    chart.sections[0].warning = chart.warning || chart.sections[0].warning;
+    chart.sections[0].sourceClip = chart.sourceClip;
+    chart.sections[0].partialReason = chart.partialReason;
+  }
+  return {
+    chart: chart,
+    source: source,
+    partialResult: {
+      sourceClip: chart.sourceClip,
+      reason: chart.partialReason,
+      sourceFallbackReason: detectedChords.sourceFallbackReason || null,
+    },
+  };
+}
+
+function diagnosticReason(prefix, value) {
+  var normalized = String(value || "unknown")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return prefix + (normalized ? "_" + normalized : "");
 }
 
 // Whisper-transcribe the vocals stem and locate the clip in the song.
@@ -1407,11 +1545,29 @@ async function fetchChartFromAudioAnalysis(title, artist, releaseDate, realLyric
 
   // Only use lyrics transcribed from the recording when no verified catalog
   // lyrics exist and the transcript passes a full-song completeness gate.
-  var transcription = ALLOW_CATALOG_LYRICS_TRANSCRIPTION && detectedChords.vocalsUrl
-    ? await transcribeVocalsStem(detectedChords.vocalsUrl)
-    : null;
+  var transcriptionOutcome;
+  if (!detectedChords.vocalsUrl) {
+    transcriptionOutcome = { ok: false, failure: { stage: "input", reason: "vocals_stem_unavailable", httpStatus: null } };
+  } else if (!ALLOW_CATALOG_LYRICS_TRANSCRIPTION) {
+    transcriptionOutcome = { ok: false, failure: { stage: "configuration", reason: "catalog_transcription_disabled", httpStatus: null } };
+  } else {
+    transcriptionOutcome = await transcribeVocalsStem(detectedChords.vocalsUrl);
+  }
   if (detectedChords.vocalsUrl && !ALLOW_CATALOG_LYRICS_TRANSCRIPTION) {
     console.log("Lyrics: catalog transcription is disabled by ALLOW_CATALOG_LYRICS_TRANSCRIPTION");
+  }
+  var transcription = transcriptionOutcome.ok ? transcriptionOutcome.transcription : null;
+  var partialReason = transcriptionOutcome.ok
+    ? null
+    : transcriptionOutcome.failure.reason;
+  if (!transcriptionOutcome.ok) {
+    logPipelineDiagnostic("transcription_unavailable", {
+      sourceClip: detectedChords.sourceClip,
+      sourceFallbackReason: detectedChords.sourceFallbackReason,
+      stage: transcriptionOutcome.failure.stage,
+      reason: transcriptionOutcome.failure.reason,
+      httpStatus: transcriptionOutcome.failure.httpStatus,
+    });
   }
   if (transcription) {
     transcription.acceptance = assessTranscription(transcription, detectedChords.clipDuration);
@@ -1428,15 +1584,23 @@ async function fetchChartFromAudioAnalysis(title, artist, releaseDate, realLyric
         var coverageWarning = detectedChords.sourceClip === "itunes_preview_30s"
           ? "Lyrics and chords cover only the available 30-second preview, not the full song."
           : "Lyrics and chords cover only the analyzed audio clip, not a verified full-song recording.";
-        transcribedChart.partial = true;
-        transcribedChart.warning = coverageWarning;
-        if (transcribedChart.sections && transcribedChart.sections[0]) {
-          // Persist the warning with the chart because the database schema
-          // stores sections, not top-level partial-result metadata.
-          transcribedChart.sections[0].warning = coverageWarning;
-        }
         console.log("Audio analysis: returning clip-covered vocals as an explicit partial result");
-        return { chart: transcribedChart, source: "audio_transcription_partial" };
+        return partialResult(
+          transcribedChart,
+          "audio_transcription_partial",
+          detectedChords,
+          "preview_only_not_full_song",
+          coverageWarning
+        );
+      }
+      if (transcribedChart.partial) {
+        return partialResult(
+          transcribedChart,
+          "audio_transcription_partial",
+          detectedChords,
+          "reliable_chords_unavailable",
+          transcribedChart.warning
+        );
       }
       console.log(
         "Audio analysis: accepted a complete vocals transcript (" +
@@ -1445,6 +1609,15 @@ async function fetchChartFromAudioAnalysis(title, artist, releaseDate, realLyric
       );
       return { chart: transcribedChart, source: "audio_transcription" };
     }
+    partialReason = diagnosticReason("whisper_incomplete", transcription.acceptance && transcription.acceptance.reason);
+    logPipelineDiagnostic("whisper_incomplete", {
+      sourceClip: detectedChords.sourceClip,
+      sourceFallbackReason: detectedChords.sourceFallbackReason,
+      reason: transcription.acceptance && transcription.acceptance.reason,
+      segmentCount: transcription.segments.length,
+      wordCount: transcription.words.length,
+      expectedDuration: detectedChords.clipDuration,
+    });
     console.log("Audio analysis: vocals transcript rejected as incomplete");
   }
 
@@ -1453,30 +1626,50 @@ async function fetchChartFromAudioAnalysis(title, artist, releaseDate, realLyric
   // explicit warning. The UI can render this partial chart and the user keeps
   // the useful work that did succeed.
   var chordOnlyChart = buildChordOnlyChart(title, artist, detectedChords, confirmedKey, spotifyTempo);
-  if (chordOnlyChart) return { chart: chordOnlyChart, source: "audio_analysis_partial" };
+  if (chordOnlyChart) {
+    return partialResult(
+      chordOnlyChart,
+      "audio_analysis_partial",
+      detectedChords,
+      partialReason || "vocals_transcription_unavailable",
+      chordOnlyChart.warning
+    );
+  }
   return null;
 }
 
 async function saveChartToDB(chart, title, artist, source) {
   if (chartContainsLyricsRefusal(chart)) throw lyricsUnavailableError();
-  // Prefer a verified chart that is already visible, then use an insert-only
-  // write below so a chart created or verified concurrently is never replaced.
-  var protectedResult = await supabase
+  if (chartHasPartialMarker(chart, source)) {
+    logPipelineDiagnostic("partial_chart_not_cached", {
+      sourceClip: chart.sourceClip,
+      reason: chart.partialReason || "partial_chart",
+    });
+    return { saved: false, reason: "partial_chart_not_cached" };
+  }
+
+  // Read the exact candidates so a complete result can replace a legacy
+  // partial row. The update below is conditional on both id and
+  // verified=false (and the observed partial source), which prevents a
+  // musician-verified or concurrently corrected chart from being overwritten.
+  var existingResult = await supabase
     .from("chord_charts")
-    .select("title,artist,verified")
+    .select("id,title,artist,verified,source,sections")
     .ilike("title", "%" + normalizeForLookup(title).replace(/[%_]/g, "") + "%")
     .limit(25);
-  if (protectedResult.error) throw databaseError("read", protectedResult.error);
-  var protectedChart = (protectedResult.data || []).some(function (row) {
-    return row.verified === true && titlesMatch(row.title, title) && artistsLooselyMatch(row.artist, artist);
+  if (existingResult.error) throw databaseError("read", existingResult.error);
+  var matchingRows = (existingResult.data || []).filter(function (row) {
+    return titlesMatch(row.title, title) && artistsLooselyMatch(row.artist, artist);
   });
+  var protectedChart = matchingRows.some(function (row) { return row.verified === true; });
   if (protectedChart) {
     var protectedError = new Error("A musician-verified chart already exists and was not overwritten.");
     protectedError.code = "VERIFIED_CHART_PROTECTED";
     protectedError.httpStatus = 409;
     throw protectedError;
   }
-  var saveResult = await supabase.from("chord_charts").insert({
+
+  var rowPayload = {
     title:       chart.title  || title,
     artist:      chart.artist || artist,
     musical_key: chart.musicalKey,
@@ -1486,7 +1679,44 @@ async function saveChartToDB(chart, title, artist, source) {
     source:      source || "ai_generated",
     verified:    false,
     play_count:  1
-  }).select("id");
+  };
+
+  var partialRow = matchingRows.find(rowIsUnverifiedPartial);
+  if (partialRow) {
+    var updateQuery = supabase
+      .from("chord_charts")
+      .update(rowPayload)
+      .eq("id", partialRow.id)
+      .eq("verified", false);
+    updateQuery = partialRow.source == null
+      ? updateQuery.is("source", null)
+      : updateQuery.eq("source", partialRow.source);
+    var updateResult = await updateQuery.select("id");
+    if (updateResult.error) throw databaseError("write", updateResult.error);
+    if (!updateResult.data || updateResult.data.length === 0) {
+      var racedResult = await supabase
+        .from("chord_charts")
+        .select("id,verified,source")
+        .eq("id", partialRow.id)
+        .limit(1);
+      if (racedResult.error) throw databaseError("read", racedResult.error);
+      var racedRow = racedResult.data && racedResult.data[0];
+      var raceError = new Error(
+        racedRow && racedRow.verified === true
+          ? "A musician-verified chart was saved concurrently and was not overwritten."
+          : "The cached chart changed concurrently and was not overwritten."
+      );
+      raceError.code = racedRow && racedRow.verified === true
+        ? "VERIFIED_CHART_PROTECTED"
+        : "CHART_ALREADY_EXISTS";
+      raceError.httpStatus = 409;
+      throw raceError;
+    }
+    console.log("Supabase save: replaced legacy unverified partial chart (source=" + (source || "ai_generated") + ")");
+    return { saved: true, replacedPartial: true };
+  }
+
+  var saveResult = await supabase.from("chord_charts").insert(rowPayload).select("id");
   if (saveResult.error && saveResult.error.code === "23505") {
     var conflictError = new Error("Another chart for this song was saved first and was not overwritten.");
     conflictError.code = "CHART_ALREADY_EXISTS";
@@ -2085,8 +2315,16 @@ app.post("/chords", rateLimit("chords", 50), async function(req, res) {
     // Try real chord sources (Cifra Club → e-chords) first, LLM as fallback.
     var result = await fetchChartFromSources(title, artist, null);
     result.chart.source = result.source;
-    await saveChartToDB(result.chart, title, artist, result.source);
-    res.json({ found: true, fromDatabase: false, chart: result.chart, source: result.source });
+    var persistence = await saveChartToDB(result.chart, title, artist, result.source);
+    var responseBody = {
+      found: true,
+      fromDatabase: false,
+      chart: result.chart,
+      source: result.source,
+      cached: persistence.saved === true,
+    };
+    if (result.partialResult) responseBody.partialResult = result.partialResult;
+    res.json(responseBody);
   } catch(e) {
     if (e.code === "CHART_ALREADY_EXISTS" || e.code === "VERIFIED_CHART_PROTECTED") {
       try {
@@ -2236,8 +2474,14 @@ app.post("/identify", rateLimit("identify", 50), async function(req, res) {
           var chart  = result.chart;
           var source = result.source;
           chart.source = source;
-          await saveChartToDB(chart, songInfo.title, songInfo.artist, source);
-          return { fromDatabase: false, chart: chart, source: source };
+          var persistence = await saveChartToDB(chart, songInfo.title, songInfo.artist, source);
+          return {
+            fromDatabase: false,
+            chart: chart,
+            source: source,
+            cached: persistence.saved === true,
+            partialResult: result.partialResult || null,
+          };
         } finally {
           if (identifyChartRequests.get(chartRequestKey) === chartRequest) {
             identifyChartRequests.delete(chartRequestKey);
@@ -2333,6 +2577,8 @@ app.post("/identify", rateLimit("identify", 50), async function(req, res) {
       songInfo: songInfo,
       chart: chartResult.chart,
       source: chartResult.source,
+      cached: chartResult.cached,
+      partialResult: chartResult.partialResult || undefined,
       lyricsAvailable: lyricsAvailable,
       lyricsUnavailable: !lyricsAvailable,
     });
@@ -2557,5 +2803,9 @@ module.exports = {
     buildChordOnlyChart,
     validateAndRepairChart,
     audioExtensionForMime,
+    chartHasPartialMarker,
+    rowIsUnverifiedPartial,
+    classifyWhisperFailure,
+    diagnosticReason,
   },
 };

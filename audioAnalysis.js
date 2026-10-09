@@ -55,6 +55,21 @@ function normalizeForMatch(s) {
     .trim();
 }
 
+// Keep production diagnostics machine-readable and deliberately small. These
+// fields describe control flow only; they never include URLs, provider
+// responses, audio bytes, lyrics, or credentials.
+function logAudioDiagnostic(event, details) {
+  var allowed = ["sourceClip", "fallbackReason", "stage", "reason"];
+  var payload = { component: "audio_analysis", event: String(event || "unknown") };
+  details = details || {};
+  allowed.forEach(function (key) {
+    if (details[key] !== undefined && details[key] !== null && details[key] !== "") {
+      payload[key] = String(details[key]);
+    }
+  });
+  console.log("PIPELINE_DIAGNOSTIC " + JSON.stringify(payload));
+}
+
 function artistLooselyMatches(a, b) {
   var na = normalizeForMatch(a).replace(/\s*(feat|featuring|with|and|x)\s+.*$/, "").trim();
   var nb = normalizeForMatch(b).replace(/\s*(feat|featuring|with|and|x)\s+.*$/, "").trim();
@@ -62,7 +77,7 @@ function artistLooselyMatches(a, b) {
   return na === nb || na.indexOf(nb) !== -1 || nb.indexOf(na) !== -1;
 }
 
-async function findItunesPreview(title, artist) {
+async function findItunesPreview(title, artist, diagnostics) {
   try {
     var url = "https://itunes.apple.com/search?term=" + encodeURIComponent(title + " " + artist) + "&entity=song&limit=10";
     var res = await axios.get(url);
@@ -85,12 +100,14 @@ async function findItunesPreview(title, artist) {
       });
     }
     if (!match) {
+      if (diagnostics) diagnostics.reason = "itunes_no_matching_result";
       console.log("audioAnalysis: no iTunes result matched '" + title + "' by '" + artist + "'");
       return null;
     }
     console.log("audioAnalysis: using iTunes preview '" + match.trackName + "' by '" + match.artistName + "' (" + (match.collectionName || "single") + ")");
     return match.previewUrl;
   } catch (e) {
+    if (diagnostics) diagnostics.reason = "itunes_lookup_failed";
     console.log("audioAnalysis: iTunes preview lookup failed:", e.message);
     return null;
   }
@@ -135,8 +152,9 @@ function runYtDlp(args, timeoutMs) {
 }
 
 // Download the full song from YouTube. Returns { buffer, videoTitle } or null.
-async function downloadFullSong(title, artist) {
+async function downloadFullSong(title, artist, diagnostics) {
   if (!resolveYtDlp()) {
+    if (diagnostics) diagnostics.reason = "yt_dlp_unavailable";
     console.log("audioAnalysis: yt-dlp not installed — full-song path unavailable");
     return null;
   }
@@ -151,6 +169,7 @@ async function downloadFullSong(title, artist) {
     "--no-playlist", "--no-warnings", "--skip-download",
   ], 60000);
   if (probe.err) {
+    if (diagnostics) diagnostics.reason = "youtube_search_failed";
     console.log("audioAnalysis: YouTube search failed:", (probe.stderr || probe.err.message).split("\n")[0]);
     return null;
   }
@@ -168,6 +187,7 @@ async function downloadFullSong(title, artist) {
     chosen = { id: parts[0], duration: duration, title: videoTitle };
   });
   if (!chosen) {
+    if (diagnostics) diagnostics.reason = "youtube_no_matching_result";
     console.log("audioAnalysis: no YouTube result matched '" + title + "' — falling back to preview");
     return null;
   }
@@ -184,6 +204,7 @@ async function downloadFullSong(title, artist) {
     "-o", outPath,
   ], 240000);
   if (dl.err || !fs.existsSync(outPath)) {
+    if (diagnostics) diagnostics.reason = "youtube_download_failed";
     console.log("audioAnalysis: YouTube download failed:", (dl.stderr || (dl.err && dl.err.message) || "no output file").split("\n")[0]);
     try { fs.unlinkSync(outPath); } catch (_) {}
     return null;
@@ -658,27 +679,47 @@ async function analyzeAudioForChords(title, artist) {
   // iTunes preview when YouTube is blocked or has no matching video.
   var sourceClip = null;
   var audioBuffer = null;
+  var sourceFallbackReason = null;
+  var fullSongDiagnostics = {};
 
-  var fullSong = await downloadFullSong(title, artist).catch(function (e) {
+  var fullSong = await downloadFullSong(title, artist, fullSongDiagnostics).catch(function (e) {
+    fullSongDiagnostics.reason = "youtube_full_path_exception";
     console.log("audioAnalysis: full-song path error:", e.message);
     return null;
   });
   if (fullSong) {
     audioBuffer = fullSong.buffer;
     sourceClip = "youtube_full";
+    logAudioDiagnostic("source_selected", { sourceClip: sourceClip });
   } else {
-    var previewUrl = await findItunesPreview(title, artist);
+    sourceFallbackReason = fullSongDiagnostics.reason || "youtube_full_unavailable";
+    var previewDiagnostics = {};
+    var previewUrl = await findItunesPreview(title, artist, previewDiagnostics);
     if (!previewUrl) {
+      logAudioDiagnostic("source_unavailable", {
+        stage: "source_acquisition",
+        reason: previewDiagnostics.reason || "itunes_preview_unavailable",
+        fallbackReason: sourceFallbackReason,
+      });
       console.log("audioAnalysis: no iTunes preview found for", title, "by", artist);
       return null;
     }
     try {
       audioBuffer = await downloadBuffer(previewUrl);
     } catch (e) {
+      logAudioDiagnostic("source_unavailable", {
+        stage: "itunes_preview_download",
+        reason: "itunes_preview_download_failed",
+        fallbackReason: sourceFallbackReason,
+      });
       console.log("audioAnalysis: failed to download preview:", e.message);
       return null;
     }
     sourceClip = "itunes_preview_30s";
+    logAudioDiagnostic("source_selected", {
+      sourceClip: sourceClip,
+      fallbackReason: sourceFallbackReason,
+    });
   }
 
   console.log("audioAnalysis: running Demucs on " + sourceClip + " for", title, "by", artist, "...");
@@ -707,6 +748,7 @@ async function analyzeAudioForChords(title, artist) {
         clipDuration: raw.clipDuration,
         vocalsUrl: stems.vocals || null,
         sourceClip: sourceClip,
+        sourceFallbackReason: sourceFallbackReason,
         chordStem: stemName,
         chordConfidence: summary.avgStrength,
       };
@@ -735,6 +777,7 @@ async function analyzeAudioForChords(title, artist) {
     clipDuration: bestWeakResult ? bestWeakResult.clipDuration : null,
     vocalsUrl: stems.vocals || null,
     sourceClip: sourceClip,
+    sourceFallbackReason: sourceFallbackReason,
     chordStem: bestWeakResult ? bestWeakResult.chordStem : null,
     chordConfidence: bestWeakResult ? bestWeakResult.chordConfidence : null,
   };
