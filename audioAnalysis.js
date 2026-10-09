@@ -128,9 +128,9 @@ async function downloadBuffer(url) {
 // datacenter IPs, so every failure here returns null and the caller falls
 // back to the iTunes preview path.
 
-// Resolve yt-dlp: a system install (brew locally, nixpacks on Railway —
-// see nixpacks.toml) is preferred; the npm-bundled zipapp works wherever
-// Python >= 3.10 exists.
+// Resolve yt-dlp: a system install (e.g. Homebrew) is preferred. Railway's
+// Railpack runtime installs Python via railpack.json so the npm-bundled
+// zipapp can run there as well.
 function isExecutableFile(candidate) {
   if (!candidate) return false;
   try {
@@ -140,9 +140,8 @@ function isExecutableFile(candidate) {
   }
 }
 
-// Nixpacks exposes installed packages through PATH. Resolve that location
-// before the npm zipapp: the system package carries its own Python runtime and
-// is considerably more reliable in Railway containers.
+// Resolve system installations through PATH before falling back to the npm
+// zipapp. The Railway runtime provides its Python interpreter via railpack.json.
 function resolveYtDlp() {
   if (isExecutableFile(process.env.YT_DLP_PATH)) {
     return { executable: process.env.YT_DLP_PATH, source: "environment" };
