@@ -39,6 +39,7 @@ function SongPageInner() {
   const [diagramChord, setDiagramChord] = useState<string | null>(null);
 
   const [editMode, setEditMode] = useState(false);
+  const [editSessionToken, setEditSessionToken] = useState<string | null>(null);
   const [draft, setDraft] = useState<ChordChart | null>(null);
   const [editTarget, setEditTarget] = useState<ChordTarget | null>(null);
   const [saving, setSaving] = useState(false);
@@ -112,16 +113,18 @@ function SongPageInner() {
   }, [title, artist, lyricsUnavailable, isAuthenticated, authLoading]);
 
   const startEdit = useCallback(() => {
-    if (!chart) return;
+    if (!chart || !session?.access_token) return;
     setDraft(structuredClone(chart));
     setDirty(false);
+    setEditSessionToken(session.access_token);
     setEditMode(true);
-  }, [chart]);
+  }, [chart, session]);
 
   const cancelEdit = useCallback(() => {
     if (dirty && !window.confirm("Throw away your chord changes without saving?"))
       return;
     setEditMode(false);
+    setEditSessionToken(null);
     setDraft(null);
     setEditTarget(null);
     setDirty(false);
@@ -160,7 +163,7 @@ function SongPageInner() {
   }, [draft, editTarget]);
 
   const saveEdits = useCallback(async () => {
-    if (!draft) return;
+    if (!draft || !session?.access_token) return;
     setSaving(true);
     try {
       await saveCorrection({
@@ -170,9 +173,10 @@ function SongPageInner() {
         musicalKey: draft.musicalKey,
         tempo: draft.tempo,
         capo: draft.capo,
-      });
+      }, session.access_token);
       setChart({ ...draft, verified: true });
       setEditMode(false);
+      setEditSessionToken(null);
       setDraft(null);
       setDirty(false);
     } catch (e) {
@@ -180,7 +184,7 @@ function SongPageInner() {
     } finally {
       setSaving(false);
     }
-  }, [draft, title, artist]);
+  }, [draft, title, artist, session]);
 
   if (loading || authLoading) return <main />;
 
@@ -207,7 +211,9 @@ function SongPageInner() {
     );
   }
 
-  const shown = editMode && draft ? draft : chart;
+  const canEdit = isAuthenticated && Boolean(session?.access_token);
+  const editing = editMode && canEdit && session?.access_token === editSessionToken;
+  const shown = editing && draft ? draft : chart;
 
   return (
     <main>
@@ -216,7 +222,7 @@ function SongPageInner() {
           ← Search
         </Link>
         <div className={styles.actions}>
-          {editMode ? (
+          {editing ? (
             <>
               <button className={styles.action} onClick={cancelEdit}>
                 Cancel
@@ -234,15 +240,17 @@ function SongPageInner() {
               <button className={styles.action} onClick={() => window.print()}>
                 Print
               </button>
-              <button className={styles.action} onClick={startEdit}>
-                Edit chords
-              </button>
+              {canEdit && (
+                <button className={styles.action} onClick={startEdit}>
+                  Edit chords
+                </button>
+              )}
             </>
           )}
         </div>
       </div>
 
-      {editMode && (
+      {editing && (
         <p className={`${styles.editBanner} no-print`}>
           {dirty
             ? '⚠️ You have unsaved changes — press "Save chart" above to keep them!'
@@ -259,7 +267,7 @@ function SongPageInner() {
 
       <ChartView
         chart={shown}
-        editMode={editMode}
+        editMode={editing}
         onShowDiagram={setDiagramChord}
         onEditChord={setEditTarget}
       />

@@ -9,9 +9,17 @@ const API_URL =
   "https://music-player-production-524a.up.railway.app";
 
 class HttpError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string
+  ) {
     super(message);
   }
+}
+
+function isDatabaseError(error: unknown): error is HttpError {
+  return error instanceof HttpError && Boolean(error.code?.startsWith("DATABASE_"));
 }
 
 export type SearchSong = {
@@ -37,7 +45,14 @@ export async function getCachedChart(
   const res = await fetch(
     `${API_URL}/chords?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}`
   );
-  if (!res.ok) return null;
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new HttpError(
+      body?.error || `Chart lookup failed (${res.status})`,
+      res.status,
+      body?.code
+    );
+  }
   const data = await res.json();
   return data.found ? (data.chart as ChordChart) : null;
 }
@@ -56,7 +71,8 @@ export async function generateChart(
     const body = await res.json().catch(() => null);
     throw new HttpError(
       body?.error || `Chart generation failed (${res.status})`,
-      res.status
+      res.status,
+      body?.code
     );
   }
   const data = await res.json();
@@ -78,13 +94,23 @@ export async function generateChartWithFallback(
   try {
     return await generateChart(title, artist);
   } catch (error) {
-    if (error instanceof HttpError && error.status >= 400 && error.status < 500) {
+    if (
+      isDatabaseError(error) ||
+      (error instanceof HttpError && error.status >= 400 && error.status < 500)
+    ) {
       throw error;
     }
     const deadline = Date.now() + maxPollMs;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, pollIntervalMs));
-      const cached = await getCachedChart(title, artist).catch(() => null);
+      let cached: ChordChart | null = null;
+      try {
+        cached = await getCachedChart(title, artist);
+      } catch (cacheError) {
+        // Database failures are explicit server responses, not evidence that
+        // a long-running generation request is still finishing.
+        if (isDatabaseError(cacheError)) throw cacheError;
+      }
       if (cached) return cached;
     }
     throw new Error(
@@ -100,6 +126,7 @@ export type IdentifyResult = {
   source?: string;
   lyricsAvailable?: boolean;
   lyricsUnavailable?: boolean;
+  chartDeferred?: boolean;
 };
 
 // /identify still returns the chart for recognized songs, and an uncached
@@ -155,10 +182,14 @@ export async function saveCorrection(chart: {
   musicalKey?: string | null;
   tempo?: number | null;
   capo?: number;
-}): Promise<void> {
+}, accessToken: string): Promise<void> {
+  if (!accessToken) throw new Error("Sign in to edit chord charts.");
   const res = await fetch(`${API_URL}/chords`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
     body: JSON.stringify(chart),
   });
   if (!res.ok) {
